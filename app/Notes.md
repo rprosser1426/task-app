@@ -50,3 +50,8 @@ Component	Tier	Cost
 Supabase (Database & Auth)	Free	$0/mo
 Vercel (App hosting)	Free	$0/mo
 Total Monthly Cost	—	$0/mo
+
+## Format Code
+Click anywhere inside the file, then press:
+
+Shift + Alt + F
