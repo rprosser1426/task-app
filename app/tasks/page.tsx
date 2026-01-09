@@ -24,15 +24,17 @@ type AssignmentRow = {
 type TaskRow = {
   id: string;
   title: string;
+  note: string | null;
   status: string | null;
   is_done: boolean;
   due_at: string;
   user_id: string;
   created_at: string | null;
-  task_assignments: AssignmentRow[]; // normalized to ALWAYS be array
+  task_assignments: AssignmentRow[]; // ALWAYS normalized to array
 };
 
 function toISOFromDateInput(dateStr: string) {
+  // Use noon local time to reduce timezone edge cases
   return new Date(`${dateStr}T12:00:00`).toISOString();
 }
 
@@ -70,12 +72,16 @@ export default function TasksPage() {
   const [editTaskId, setEditTaskId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState<string>("");
   const [editDueDate, setEditDueDate] = useState<string>("");
+  const [editNote, setEditNote] = useState<string>("");
 
   // Multi-assignment draft: taskId -> array of assigneeIds
   const [assignmentDraft, setAssignmentDraft] = useState<Record<string, string[]>>({});
 
-  // Optional: prevent rapid double-saves
+  // Prevent overlapping saves per task
   const [savingAssignments, setSavingAssignments] = useState<Record<string, boolean>>({});
+
+  // Collapse/Expand: only one open at a time (keeps UI tidy)
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
 
   const openTasks = useMemo(
     () => tasks.filter((t) => (t.status ?? "open") !== "closed"),
@@ -92,7 +98,7 @@ export default function TasksPage() {
   }
 
   function normalizeAssignments(raw: any): AssignmentRow[] {
-    // Supabase/PostgREST may return [] (array) OR null OR {} (single object)
+    // Supabase/PostgREST may return [] OR null OR a single object
     if (Array.isArray(raw)) return raw as AssignmentRow[];
     if (!raw) return [];
     return [raw as AssignmentRow];
@@ -115,7 +121,7 @@ export default function TasksPage() {
       setUserId(user.id);
       setUserEmail(user.email ?? "");
 
-      // Load my profile role
+      // Load my role
       const { data: myProfile, error: profErr } = await supabase
         .from("profiles")
         .select("role")
@@ -127,16 +133,14 @@ export default function TasksPage() {
       const admin = (myProfile?.role ?? "").toLowerCase() === "admin";
       setIsAdmin(admin);
 
-      // Load users for assignment list
+      // Load users (for assignment list)
       const { data: profileData, error: profilesErr } = await supabase
         .from("profiles")
         .select("id,email,full_name,role")
         .order("created_at", { ascending: true });
 
       if (profilesErr) throw profilesErr;
-
-      const userRows = (profileData ?? []) as ProfileRow[];
-      setUsers(userRows);
+      setUsers((profileData ?? []) as ProfileRow[]);
 
       // Load tasks + assignments
       const { data: taskData, error: taskErr } = await supabase
@@ -145,6 +149,7 @@ export default function TasksPage() {
           `
           id,
           title,
+          note,
           status,
           is_done,
           due_at,
@@ -167,12 +172,13 @@ export default function TasksPage() {
 
       const normalizedTaskRows: TaskRow[] = (taskData ?? []).map((t: any) => ({
         ...t,
+        note: t.note ?? null,
         task_assignments: normalizeAssignments(t.task_assignments),
       }));
 
       setTasks(normalizedTaskRows);
 
-      // Pre-fill checkboxes with current assignees
+      // Pre-fill checkbox state with current assignees
       const draft: Record<string, string[]> = {};
       for (const t of normalizedTaskRows) {
         draft[t.id] = (t.task_assignments ?? []).map((a) => a.assignee_id);
@@ -219,6 +225,7 @@ export default function TasksPage() {
         user_id: user.id,
         status: "open",
         is_done: false,
+        note: null,
       };
 
       if (newDueDate) payload.due_at = toISOFromDateInput(newDueDate);
@@ -226,13 +233,14 @@ export default function TasksPage() {
       const { data: inserted, error: insertErr } = await supabase
         .from("tasks")
         .insert(payload)
-        .select("id,title,status,is_done,due_at,user_id,created_at")
+        .select("id,title,note,status,is_done,due_at,user_id,created_at")
         .single();
 
       if (insertErr) throw insertErr;
 
       const insertedTask: TaskRow = {
         ...(inserted as any),
+        note: (inserted as any)?.note ?? null,
         task_assignments: [],
       };
 
@@ -260,6 +268,9 @@ export default function TasksPage() {
       setTasks((prev) =>
         prev.map((t) => (t.id === taskId ? { ...t, status, is_done } : t))
       );
+
+      // If we close it while expanded, collapse it
+      setExpandedTaskId((prev) => (prev === taskId ? null : prev));
     } catch (e: any) {
       setErrorMsg(e.message || "Failed updating task.");
     }
@@ -269,12 +280,16 @@ export default function TasksPage() {
     setEditTaskId(t.id);
     setEditTitle(t.title);
     setEditDueDate(t.due_at ? toDateInputFromISO(t.due_at) : "");
+    setEditNote(t.note ?? "");
+    // Ensure it is expanded while editing
+    setExpandedTaskId(t.id);
   }
 
   function cancelEdit() {
     setEditTaskId(null);
     setEditTitle("");
     setEditDueDate("");
+    setEditNote("");
   }
 
   async function saveEdit(taskId: string) {
@@ -292,16 +307,17 @@ export default function TasksPage() {
 
     try {
       const due_at = toISOFromDateInput(editDueDate);
+      const note = editNote.trim() ? editNote.trim() : null;
 
       const { error } = await supabase
         .from("tasks")
-        .update({ title, due_at })
+        .update({ title, due_at, note })
         .eq("id", taskId);
 
       if (error) throw error;
 
       setTasks((prev) =>
-        prev.map((t) => (t.id === taskId ? { ...t, title, due_at } : t))
+        prev.map((t) => (t.id === taskId ? { ...t, title, due_at, note } : t))
       );
 
       cancelEdit();
@@ -325,6 +341,8 @@ export default function TasksPage() {
       });
 
       if (editTaskId === taskId) cancelEdit();
+
+      setExpandedTaskId((prev) => (prev === taskId ? null : prev));
     } catch (e: any) {
       setErrorMsg(e.message || "Failed deleting task.");
     }
@@ -339,9 +357,7 @@ export default function TasksPage() {
       return;
     }
 
-    // prevent overlapping saves per task
     if (savingAssignments[taskId]) return;
-
     setSavingAssignments((prev) => ({ ...prev, [taskId]: true }));
 
     try {
@@ -388,8 +404,6 @@ export default function TasksPage() {
       : current.filter((id) => id !== assigneeId);
 
     setAssignmentDraft((prev) => ({ ...prev, [taskId]: next }));
-
-    // Save immediately (simple + reliable)
     void syncAssignees(taskId, next);
   }
 
@@ -399,6 +413,11 @@ export default function TasksPage() {
   }
 
   const assignableUsers = users.filter((u) => u.id !== userId);
+
+  function toggleExpanded(taskId: string) {
+    // Don't toggle collapse while editing another task
+    setExpandedTaskId((prev) => (prev === taskId ? null : taskId));
+  }
 
   return (
     <div style={styles.page}>
@@ -455,6 +474,7 @@ export default function TasksPage() {
           <div style={styles.muted}>Loading…</div>
         ) : (
           <div style={styles.grid}>
+            {/* OPEN */}
             <section style={styles.column}>
               <div style={styles.colTitle}>Open</div>
 
@@ -463,145 +483,33 @@ export default function TasksPage() {
               ) : (
                 openTasks.map((t) => {
                   const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
-                  const assignedLabel =
-                    assignees.length > 0 ? assignees.map(displayUserName).join(", ") : "No";
-
                   const isSaving = !!savingAssignments[t.id];
                   const draftIds = assignmentDraft[t.id] ?? assignees;
 
-                  return (
-                    <div key={t.id} style={styles.taskCard}>
-                      {editTaskId === t.id ? (
-                        <div style={{ display: "grid", gap: 10 }}>
-                          <input
-                            style={styles.input}
-                            value={editTitle}
-                            onChange={(e) => setEditTitle(e.target.value)}
-                          />
-
-                          <input
-                            style={styles.dateInputWide}
-                            type="date"
-                            value={editDueDate}
-                            onChange={(e) => setEditDueDate(e.target.value)}
-                          />
-
-                          <div style={styles.taskActions}>
-                            <button style={styles.smallBtn} onClick={() => saveEdit(t.id)}>
-                              Save
-                            </button>
-                            <button style={styles.smallBtn} onClick={cancelEdit}>
-                              Cancel
-                            </button>
-                            <button style={styles.smallDanger} onClick={() => deleteTask(t.id)}>
-                              Delete
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          <div style={styles.taskTitle}>{t.title}</div>
-
-                          <div style={styles.taskMeta}>
-                            <span style={styles.pill}>OPEN</span>
-                            <span style={styles.metaText}>
-                              Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
-                            </span>
-                            {isSaving && <span style={styles.savingPill}>Saving…</span>}
-                          </div>
-
-                          <div style={styles.metaText}>Assigned:</div>
-
-                          <div style={styles.assigneePillsWrap}>
-                            {assignees.length === 0 ? (
-                              <span style={{ ...styles.assigneePill, opacity: 0.75 }}>No one</span>
-                            ) : (
-                              assignees.map((uid) => (
-                                <span key={uid} style={styles.assigneePill}>
-                                  {displayUserName(uid)}
-                                </span>
-                              ))
-                            )}
-                          </div>
-
-
-                          {isAdmin && (
-                            <div style={{ marginTop: 10 }}>
-                              <div style={styles.assignBox}>
-                                {assignableUsers.length === 0 ? (
-                                  <div style={styles.metaText}>No other users available.</div>
-                                ) : (
-                                  assignableUsers.map((u) => {
-                                    const label = u.full_name || u.email || u.id;
-                                    const checked = draftIds.includes(u.id);
-
-                                    return (
-                                      <label key={u.id} style={styles.checkboxRow}>
-                                        <input
-                                          type="checkbox"
-                                          checked={checked}
-                                          disabled={isSaving}
-                                          onChange={(e) =>
-                                            toggleAssignee(t.id, u.id, e.currentTarget.checked)
-                                          }
-                                        />
-                                        <span style={{ marginLeft: 10 }}>{label}</span>
-                                      </label>
-                                    );
-                                  })
-                                )}
-                              </div>
-                              <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
-                                Check one or more people to assign this task.
-                              </div>
-                            </div>
-                          )}
-
-                          <div style={styles.taskActions}>
-                            <button style={styles.smallBtn} onClick={() => startEdit(t)}>
-                              Edit
-                            </button>
-                            <button
-                              style={styles.smallBtn}
-                              onClick={() => setTaskStatus(t.id, "closed")}
-                            >
-                              Complete
-                            </button>
-                            <button style={styles.smallDanger} onClick={() => deleteTask(t.id)}>
-                              Delete
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  );
-                })
-              )}
-            </section>
-
-            <section style={styles.column}>
-              <div style={styles.colTitle}>Closed</div>
-
-              {closedTasks.length === 0 ? (
-                <div style={styles.empty}>No closed tasks.</div>
-              ) : (
-                closedTasks.map((t) => {
-                  const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
-                  const assignedLabel =
-                    assignees.length > 0 ? assignees.map(displayUserName).join(", ") : "No";
+                  const isExpanded = expandedTaskId === t.id;
 
                   return (
-                    <div key={t.id} style={styles.taskCard}>
-                      <div style={styles.taskTitle}>{t.title}</div>
+                    <div
+                      key={t.id}
+                      style={{
+                        ...styles.taskCard,
+                        ...(isExpanded ? styles.taskCardExpanded : null),
+                      }}
+                      onClick={() => toggleExpanded(t.id)}
+                    >
+                      {/* ALWAYS VISIBLE (compact) */}
+                      <div style={styles.taskTopRow}>
+                        <div style={styles.taskTitle}>{t.title}</div>
+                        <div style={styles.chev}>{isExpanded ? "▲" : "▼"}</div>
+                      </div>
 
                       <div style={styles.taskMeta}>
-                        <span style={{ ...styles.pill, opacity: 0.75 }}>CLOSED</span>
+                        <span style={styles.pill}>OPEN</span>
                         <span style={styles.metaText}>
                           Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
                         </span>
+                        {isSaving && <span style={styles.savingPill}>Saving…</span>}
                       </div>
-
-                      <div style={styles.metaText}>Assigned:</div>
 
                       <div style={styles.assigneePillsWrap}>
                         {assignees.length === 0 ? (
@@ -615,15 +523,219 @@ export default function TasksPage() {
                         )}
                       </div>
 
+                      {/* EXPANDED CONTENT */}
+                      {isExpanded && (
+                        <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+                          {editTaskId === t.id ? (
+                            <div style={{ display: "grid", gap: 10 }}>
+                              <input
+                                style={styles.input}
+                                value={editTitle}
+                                onChange={(e) => setEditTitle(e.target.value)}
+                              />
 
-                      <div style={styles.taskActions}>
-                        <button style={styles.smallBtn} onClick={() => setTaskStatus(t.id, "open")}>
-                          Reopen
-                        </button>
-                        <button style={styles.smallDanger} onClick={() => deleteTask(t.id)}>
-                          Delete
-                        </button>
+                              <input
+                                style={styles.dateInputWide}
+                                type="date"
+                                value={editDueDate}
+                                onChange={(e) => setEditDueDate(e.target.value)}
+                              />
+
+                              <textarea
+                                value={editNote}
+                                onChange={(e) => setEditNote(e.target.value)}
+                                placeholder="Add a note for this task…"
+                                style={styles.textarea}
+                              />
+
+                              <div style={styles.taskActions}>
+                                <button
+                                  style={styles.smallBtn}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    saveEdit(t.id);
+                                  }}
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  style={styles.smallBtn}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    cancelEdit();
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  style={styles.smallDanger}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteTask(t.id);
+                                  }}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              {t.note ? (
+                                <div style={{ ...styles.metaText, whiteSpace: "pre-wrap" }}>
+                                  <span style={{ opacity: 0.8 }}>Note: </span>
+                                  <b>{t.note}</b>
+                                </div>
+                              ) : null}
+
+                              {isAdmin && (
+                                <div style={{ marginTop: 10 }}>
+                                  <div style={styles.assignBox}>
+                                    {assignableUsers.length === 0 ? (
+                                      <div style={styles.metaText}>No other users available.</div>
+                                    ) : (
+                                      assignableUsers.map((u) => {
+                                        const label = u.full_name || u.email || u.id;
+                                        const checked = draftIds.includes(u.id);
+
+                                        return (
+                                          <label key={u.id} style={styles.checkboxRow}>
+                                            <input
+                                              type="checkbox"
+                                              checked={checked}
+                                              disabled={isSaving}
+                                              onChange={(e) =>
+                                                toggleAssignee(t.id, u.id, e.currentTarget.checked)
+                                              }
+                                            />
+                                            <span style={{ marginLeft: 10 }}>{label}</span>
+                                          </label>
+                                        );
+                                      })
+                                    )}
+                                  </div>
+                                  <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
+                                    Check one or more people to assign this task.
+                                  </div>
+                                </div>
+                              )}
+
+                              <div style={styles.taskActions}>
+                                <button
+                                  style={styles.smallBtn}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    startEdit(t);
+                                  }}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  style={styles.smallBtn}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setTaskStatus(t.id, "closed");
+                                  }}
+                                >
+                                  Complete
+                                </button>
+                                <button
+                                  style={styles.smallDanger}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteTask(t.id);
+                                  }}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </section>
+
+            {/* CLOSED */}
+            <section style={styles.column}>
+              <div style={styles.colTitle}>Closed</div>
+
+              {closedTasks.length === 0 ? (
+                <div style={styles.empty}>No closed tasks.</div>
+              ) : (
+                closedTasks.map((t) => {
+                  const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
+                  const isExpanded = expandedTaskId === t.id;
+
+                  return (
+                    <div
+                      key={t.id}
+                      style={{
+                        ...styles.taskCard,
+                        ...(isExpanded ? styles.taskCardExpanded : null),
+                        opacity: 0.95,
+                      }}
+                      onClick={() => toggleExpanded(t.id)}
+                    >
+                      {/* ALWAYS VISIBLE (compact) */}
+                      <div style={styles.taskTopRow}>
+                        <div style={styles.taskTitle}>{t.title}</div>
+                        <div style={styles.chev}>{isExpanded ? "▲" : "▼"}</div>
                       </div>
+
+                      <div style={styles.taskMeta}>
+                        <span style={{ ...styles.pill, opacity: 0.75 }}>CLOSED</span>
+                        <span style={styles.metaText}>
+                          Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
+                        </span>
+                      </div>
+
+                      <div style={styles.assigneePillsWrap}>
+                        {assignees.length === 0 ? (
+                          <span style={{ ...styles.assigneePill, opacity: 0.75 }}>No one</span>
+                        ) : (
+                          assignees.map((uid) => (
+                            <span key={uid} style={styles.assigneePill}>
+                              {displayUserName(uid)}
+                            </span>
+                          ))
+                        )}
+                      </div>
+
+                      {/* EXPANDED CONTENT */}
+                      {isExpanded && (
+                        <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+                          {t.note ? (
+                            <div style={{ ...styles.metaText, whiteSpace: "pre-wrap" }}>
+                              <span style={{ opacity: 0.8 }}>Note: </span>
+                              <b>{t.note}</b>
+                            </div>
+                          ) : null}
+
+                          <div style={styles.taskActions}>
+                            <button
+                              style={styles.smallBtn}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setTaskStatus(t.id, "open");
+                              }}
+                            >
+                              Reopen
+                            </button>
+                            <button
+                              style={styles.smallDanger}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteTask(t.id);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })
@@ -650,6 +762,250 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
   },
 
+  shell: { maxWidth: 980, margin: "0 auto", padding: 24 },
+
+  header: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    marginBottom: 18,
+  },
+
+  brand: { display: "flex", alignItems: "center", gap: 12 },
+
+  logo: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    background: "rgba(255,255,255,0.18)",
+    border: "1px solid rgba(255,255,255,0.2)",
+  },
+
+  hTitle: { fontSize: 20, fontWeight: 800 },
+
+  hSub: { fontSize: 13, opacity: 0.85, marginTop: 2 },
+
+  ghostBtn: {
+    padding: "10px 12px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(255,255,255,0.08)",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    fontWeight: 600,
+  },
+
+  card: {
+    borderRadius: 16,
+    padding: 16,
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+    marginBottom: 18,
+  },
+
+  row: { display: "flex", gap: 10, flexWrap: "wrap" },
+
+  input: {
+    flex: 1,
+    minWidth: 220,
+    padding: "12px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(0,0,0,0.25)",
+    color: "#e5e7eb",
+    outline: "none",
+  },
+
+  dateInput: {
+    width: 170,
+    padding: "12px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(0,0,0,0.25)",
+    color: "#e5e7eb",
+    outline: "none",
+  },
+
+  dateInputWide: {
+    width: "100%",
+    padding: "12px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(0,0,0,0.25)",
+    color: "#e5e7eb",
+    outline: "none",
+  },
+
+  textarea: {
+    width: "100%",
+    minHeight: 90,
+    padding: "12px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(0,0,0,0.25)",
+    color: "#e5e7eb",
+    outline: "none",
+    resize: "vertical",
+    fontFamily: "inherit",
+  },
+
+  primaryBtn: {
+    padding: "12px 14px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(255,255,255,0.14)",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+
+  error: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 12,
+    background: "rgba(239, 68, 68, 0.15)",
+    border: "1px solid rgba(239, 68, 68, 0.25)",
+    fontSize: 13,
+  },
+
+  grid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 14,
+  },
+
+  column: {
+    borderRadius: 16,
+    padding: 14,
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.10)",
+  },
+
+  colTitle: { fontSize: 14, fontWeight: 800, opacity: 0.9, marginBottom: 10 },
+
+  taskCard: {
+    borderRadius: 14,
+    padding: 12,
+    background: "rgba(0,0,0,0.22)",
+    border: "1px solid rgba(255,255,255,0.10)",
+    marginBottom: 10,
+    cursor: "pointer",
+  },
+
+  taskCardExpanded: {
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(0,0,0,0.28)",
+  },
+
+  taskTopRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+  },
+
+  chev: {
+    fontSize: 12,
+    opacity: 0.75,
+    userSelect: "none",
+    paddingLeft: 10,
+  },
+
+  taskTitle: { fontSize: 14, fontWeight: 700 },
+
+  taskMeta: {
+    marginTop: 8,
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    flexWrap: "wrap",
+  },
+
+  pill: {
+    fontSize: 11,
+    fontWeight: 800,
+    padding: "4px 8px",
+    borderRadius: 999,
+    background: "rgba(255,255,255,0.10)",
+    border: "1px solid rgba(255,255,255,0.14)",
+    letterSpacing: 0.6,
+  },
+
+  savingPill: {
+    fontSize: 11,
+    fontWeight: 800,
+    padding: "4px 8px",
+    borderRadius: 999,
+    background: "rgba(59,130,246,0.18)",
+    border: "1px solid rgba(59,130,246,0.28)",
+    letterSpacing: 0.3,
+    opacity: 0.95,
+  },
+
+  metaText: { fontSize: 12, opacity: 0.9 },
+
+  taskActions: { marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" },
+
+  smallBtn: {
+    padding: "8px 10px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(255,255,255,0.10)",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 12,
+  },
+
+  smallDanger: {
+    padding: "8px 10px",
+    borderRadius: 10,
+    border: "1px solid rgba(239, 68, 68, 0.25)",
+    background: "rgba(239, 68, 68, 0.15)",
+    color: "#e5e7eb",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 12,
+  },
+
+  empty: {
+    padding: 12,
+    borderRadius: 12,
+    background: "rgba(255,255,255,0.04)",
+    border: "1px dashed rgba(255,255,255,0.14)",
+    opacity: 0.85,
+    fontSize: 13,
+  },
+
+  muted: { opacity: 0.8, padding: 12 },
+
+  footerNote: { marginTop: 16, fontSize: 12, opacity: 0.8 },
+
+  // Checkbox UI
+  assignBox: {
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(0,0,0,0.18)",
+    padding: 10,
+    display: "grid",
+    gap: 8,
+    maxHeight: 170,
+    overflow: "auto",
+  },
+
+  checkboxRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    fontSize: 13,
+    opacity: 0.95,
+    cursor: "pointer",
+    userSelect: "none",
+  },
+
+  // Pills
   assigneePillsWrap: {
     marginTop: 8,
     display: "flex",
@@ -667,180 +1023,5 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.14)",
     letterSpacing: 0.2,
     opacity: 0.95,
-  },
-
-  shell: { maxWidth: 980, margin: "0 auto", padding: 24 },
-  header: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 12,
-    marginBottom: 18,
-  },
-  brand: { display: "flex", alignItems: "center", gap: 12 },
-  logo: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    background: "rgba(255,255,255,0.18)",
-    border: "1px solid rgba(255,255,255,0.2)",
-  },
-  hTitle: { fontSize: 20, fontWeight: 800 },
-  hSub: { fontSize: 13, opacity: 0.85, marginTop: 2 },
-  ghostBtn: {
-    padding: "10px 12px",
-    borderRadius: 10,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(255,255,255,0.08)",
-    color: "#e5e7eb",
-    cursor: "pointer",
-    fontWeight: 600,
-  },
-  card: {
-    borderRadius: 16,
-    padding: 16,
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.12)",
-    boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
-    marginBottom: 18,
-  },
-  row: { display: "flex", gap: 10, flexWrap: "wrap" },
-  input: {
-    flex: 1,
-    minWidth: 220,
-    padding: "12px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(0,0,0,0.25)",
-    color: "#e5e7eb",
-    outline: "none",
-  },
-  dateInput: {
-    width: 170,
-    padding: "12px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(0,0,0,0.25)",
-    color: "#e5e7eb",
-    outline: "none",
-  },
-  dateInputWide: {
-    width: "100%",
-    padding: "12px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(0,0,0,0.25)",
-    color: "#e5e7eb",
-    outline: "none",
-  },
-  primaryBtn: {
-    padding: "12px 14px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(255,255,255,0.14)",
-    color: "#e5e7eb",
-    cursor: "pointer",
-    fontWeight: 700,
-  },
-  error: {
-    marginTop: 10,
-    padding: 10,
-    borderRadius: 12,
-    background: "rgba(239, 68, 68, 0.15)",
-    border: "1px solid rgba(239, 68, 68, 0.25)",
-    fontSize: 13,
-  },
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 14,
-  },
-  column: {
-    borderRadius: 16,
-    padding: 14,
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.10)",
-  },
-  colTitle: { fontSize: 14, fontWeight: 800, opacity: 0.9, marginBottom: 10 },
-  taskCard: {
-    borderRadius: 14,
-    padding: 12,
-    background: "rgba(0,0,0,0.22)",
-    border: "1px solid rgba(255,255,255,0.10)",
-    marginBottom: 10,
-  },
-  taskTitle: { fontSize: 14, fontWeight: 700 },
-  taskMeta: { marginTop: 8, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
-  pill: {
-    fontSize: 11,
-    fontWeight: 800,
-    padding: "4px 8px",
-    borderRadius: 999,
-    background: "rgba(255,255,255,0.10)",
-    border: "1px solid rgba(255,255,255,0.14)",
-    letterSpacing: 0.6,
-  },
-  savingPill: {
-    fontSize: 11,
-    fontWeight: 800,
-    padding: "4px 8px",
-    borderRadius: 999,
-    background: "rgba(59,130,246,0.18)",
-    border: "1px solid rgba(59,130,246,0.28)",
-    letterSpacing: 0.3,
-    opacity: 0.95,
-  },
-  metaText: { fontSize: 12, opacity: 0.9 },
-  taskActions: { marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" },
-  smallBtn: {
-    padding: "8px 10px",
-    borderRadius: 10,
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(255,255,255,0.10)",
-    color: "#e5e7eb",
-    cursor: "pointer",
-    fontWeight: 700,
-    fontSize: 12,
-  },
-  smallDanger: {
-    padding: "8px 10px",
-    borderRadius: 10,
-    border: "1px solid rgba(239, 68, 68, 0.25)",
-    background: "rgba(239, 68, 68, 0.15)",
-    color: "#e5e7eb",
-    cursor: "pointer",
-    fontWeight: 700,
-    fontSize: 12,
-  },
-  empty: {
-    padding: 12,
-    borderRadius: 12,
-    background: "rgba(255,255,255,0.04)",
-    border: "1px dashed rgba(255,255,255,0.14)",
-    opacity: 0.85,
-    fontSize: 13,
-  },
-  muted: { opacity: 0.8, padding: 12 },
-  footerNote: { marginTop: 16, fontSize: 12, opacity: 0.8 },
-
-  // Checkbox UI
-  assignBox: {
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(0,0,0,0.18)",
-    padding: 10,
-    display: "grid",
-    gap: 8,
-    maxHeight: 170,
-    overflow: "auto",
-  },
-  checkboxRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    fontSize: 13,
-    opacity: 0.95,
-    cursor: "pointer",
-    userSelect: "none",
   },
 };
