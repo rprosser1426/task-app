@@ -35,3 +35,10 @@
 
 ## Website
 http://localhost:3000/login
+
+
+## Github
+
+git add .
+git commit -m "Short description of what I changed"
+git push
