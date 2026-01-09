@@ -1,0 +1,227 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
+
+type TaskRow = {
+  id: string;
+  user_id: string;
+  title: string;
+  is_done: boolean;
+  created_at: string;
+  due_at: string | null;
+  notes: string | null;
+};
+
+export default function TaskBoard() {
+  const [tasks, setTasks] = useState<TaskRow[]>([]);
+  const [newTitle, setNewTitle] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const remaining = useMemo(
+    () => tasks.filter((t) => !t.is_done).length,
+    [tasks]
+  );
+
+  const loadTasks = async () => {
+    setError(null);
+    setLoading(true);
+
+    const { data, error } = await supabase
+      .from("tasks")
+      .select("id,user_id,title,is_done,created_at,due_at,notes")
+      .order("created_at", { ascending: false });
+
+    if (error) setError(error.message);
+    else setTasks((data as TaskRow[]) ?? []);
+
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    loadTasks();
+
+    // Optional: auto-refresh when auth changes
+    const { data: sub } = supabase.auth.onAuthStateChange(() => {
+      loadTasks();
+    });
+
+    return () => {
+      sub.subscription.unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const addTask = async () => {
+    const title = newTitle.trim();
+    if (!title) return;
+
+    setError(null);
+    setSaving(true);
+
+    const {
+      data: { user },
+      error: userErr,
+    } = await supabase.auth.getUser();
+
+    if (userErr || !user) {
+      setSaving(false);
+      setError("Not signed in. Please log in again.");
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("tasks")
+      .insert({
+        user_id: user.id,
+        title,
+        is_done: false,
+      })
+      .select("id,user_id,title,is_done,created_at,due_at,notes")
+      .single();
+
+    if (error) {
+      setError(error.message);
+    } else if (data) {
+      setTasks((prev) => [data as TaskRow, ...prev]);
+      setNewTitle("");
+    }
+
+    setSaving(false);
+  };
+
+  const toggleDone = async (task: TaskRow) => {
+    setError(null);
+
+    // optimistic UI
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === task.id ? { ...t, is_done: !t.is_done } : t
+      )
+    );
+
+    const { error } = await supabase
+      .from("tasks")
+      .update({ is_done: !task.is_done })
+      .eq("id", task.id);
+
+    if (error) {
+      // revert if failed
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === task.id ? { ...t, is_done: task.is_done } : t
+        )
+      );
+      setError(error.message);
+    }
+  };
+
+  const deleteTask = async (taskId: string) => {
+    setError(null);
+
+    // optimistic UI
+    const before = tasks;
+    setTasks((prev) => prev.filter((t) => t.id !== taskId));
+
+    const { error } = await supabase.from("tasks").delete().eq("id", taskId);
+
+    if (error) {
+      setTasks(before);
+      setError(error.message);
+    }
+  };
+
+  return (
+    <section>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          value={newTitle}
+          onChange={(e) => setNewTitle(e.target.value)}
+          placeholder="Add a new task…"
+          style={{ flex: 1, padding: 10 }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") addTask();
+          }}
+        />
+        <button
+          onClick={addTask}
+          disabled={saving || !newTitle.trim()}
+          style={{ padding: "10px 12px", cursor: "pointer" }}
+        >
+          {saving ? "Adding..." : "Add"}
+        </button>
+        <button
+          onClick={loadTasks}
+          disabled={loading}
+          style={{ padding: "10px 12px", cursor: "pointer" }}
+        >
+          Refresh
+        </button>
+      </div>
+
+      <div style={{ marginTop: 10, fontSize: 14, opacity: 0.8 }}>
+        {loading ? "Loading tasks..." : `${remaining} remaining • ${tasks.length} total`}
+      </div>
+
+      {error && (
+        <div style={{ marginTop: 10, color: "crimson" }}>
+          {error}
+        </div>
+      )}
+
+      <ul style={{ marginTop: 14, paddingLeft: 0, listStyle: "none" }}>
+        {tasks.map((t) => (
+          <li
+            key={t.id}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "10px 8px",
+              border: "1px solid #ddd",
+              borderRadius: 8,
+              marginBottom: 8,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={t.is_done}
+              onChange={() => toggleDone(t)}
+            />
+
+            <div style={{ flex: 1 }}>
+              <div
+                style={{
+                  textDecoration: t.is_done ? "line-through" : "none",
+                  opacity: t.is_done ? 0.6 : 1,
+                  fontWeight: 600,
+                }}
+              >
+                {t.title}
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>
+                Created: {new Date(t.created_at).toLocaleString()}
+              </div>
+            </div>
+
+            <button
+              onClick={() => deleteTask(t.id)}
+              style={{ padding: "8px 10px", cursor: "pointer" }}
+              title="Delete task"
+            >
+              Delete
+            </button>
+          </li>
+        ))}
+
+        {!loading && tasks.length === 0 && (
+          <li style={{ marginTop: 12, opacity: 0.8 }}>
+            No tasks yet. Add one above.
+          </li>
+        )}
+      </ul>
+    </section>
+  );
+}
