@@ -1,19 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
-type TaskRow = {
+type ProfileRow = {
   id: string;
-  title: string;
-  status: string | null;
-  is_done: boolean;
-  due_at: string; // timestamp string
-  user_id: string;
-  created_at: string | null;
-  task_assignments?: AssignmentRow[];
-
+  email: string | null;
+  full_name: string | null;
+  role: string | null;
 };
 
 type AssignmentRow = {
@@ -26,15 +21,22 @@ type AssignmentRow = {
   created_at: string;
 };
 
+type TaskRow = {
+  id: string;
+  title: string;
+  status: string | null;
+  is_done: boolean;
+  due_at: string;
+  user_id: string;
+  created_at: string | null;
+  task_assignments: AssignmentRow[]; // normalized to ALWAYS be array
+};
 
 function toISOFromDateInput(dateStr: string) {
-  // dateStr is "YYYY-MM-DD"
-  // Use noon local time to reduce timezone/DST edge cases.
   return new Date(`${dateStr}T12:00:00`).toISOString();
 }
 
 function toDateInputFromISO(iso: string) {
-  // Convert ISO timestamp -> "YYYY-MM-DD" for <input type="date">
   const d = new Date(iso);
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -43,13 +45,15 @@ function toDateInputFromISO(iso: string) {
 }
 
 function formatDue(iso: string) {
-  // Simple readable date
   const d = new Date(iso);
   return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
 export default function TasksPage() {
   const router = useRouter();
+
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [users, setUsers] = useState<ProfileRow[]>([]);
 
   const [userEmail, setUserEmail] = useState<string>("");
   const [userId, setUserId] = useState<string>("");
@@ -58,14 +62,20 @@ export default function TasksPage() {
   const [loading, setLoading] = useState(true);
 
   const [newTitle, setNewTitle] = useState("");
-  const [newDueDate, setNewDueDate] = useState<string>(""); // "YYYY-MM-DD" or ""
+  const [newDueDate, setNewDueDate] = useState<string>("");
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Inline edit state
   const [editTaskId, setEditTaskId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState<string>("");
-  const [editDueDate, setEditDueDate] = useState<string>(""); // "YYYY-MM-DD"
+  const [editDueDate, setEditDueDate] = useState<string>("");
+
+  // Multi-assignment draft: taskId -> array of assigneeIds
+  const [assignmentDraft, setAssignmentDraft] = useState<Record<string, string[]>>({});
+
+  // Optional: prevent rapid double-saves
+  const [savingAssignments, setSavingAssignments] = useState<Record<string, boolean>>({});
 
   const openTasks = useMemo(
     () => tasks.filter((t) => (t.status ?? "open") !== "closed"),
@@ -75,6 +85,18 @@ export default function TasksPage() {
     () => tasks.filter((t) => (t.status ?? "open") === "closed"),
     [tasks]
   );
+
+  function displayUserName(uid: string) {
+    const u = users.find((x) => x.id === uid);
+    return u?.full_name || u?.email || uid;
+  }
+
+  function normalizeAssignments(raw: any): AssignmentRow[] {
+    // Supabase/PostgREST may return [] (array) OR null OR {} (single object)
+    if (Array.isArray(raw)) return raw as AssignmentRow[];
+    if (!raw) return [];
+    return [raw as AssignmentRow];
+  }
 
   async function loadSessionAndTasks() {
     setErrorMsg(null);
@@ -93,33 +115,69 @@ export default function TasksPage() {
       setUserId(user.id);
       setUserEmail(user.email ?? "");
 
+      // Load my profile role
+      const { data: myProfile, error: profErr } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .single();
+
+      if (profErr) throw profErr;
+
+      const admin = (myProfile?.role ?? "").toLowerCase() === "admin";
+      setIsAdmin(admin);
+
+      // Load users for assignment list
+      const { data: profileData, error: profilesErr } = await supabase
+        .from("profiles")
+        .select("id,email,full_name,role")
+        .order("created_at", { ascending: true });
+
+      if (profilesErr) throw profilesErr;
+
+      const userRows = (profileData ?? []) as ProfileRow[];
+      setUsers(userRows);
+
+      // Load tasks + assignments
       const { data: taskData, error: taskErr } = await supabase
         .from("tasks")
-        .select(`
-    id,
-    title,
-    status,
-    is_done,
-    due_at,
-    user_id,
-    created_at,
-    task_assignments (
-      id,
-      task_id,
-      assignee_id,
-      status,
-      completed_at,
-      completion_note,
-      created_at
-    )
-  `)
+        .select(
+          `
+          id,
+          title,
+          status,
+          is_done,
+          due_at,
+          user_id,
+          created_at,
+          task_assignments (
+            id,
+            task_id,
+            assignee_id,
+            status,
+            completed_at,
+            completion_note,
+            created_at
+          )
+        `
+        )
         .order("created_at", { ascending: false });
-
-
 
       if (taskErr) throw taskErr;
 
-      setTasks((taskData ?? []) as TaskRow[]);
+      const normalizedTaskRows: TaskRow[] = (taskData ?? []).map((t: any) => ({
+        ...t,
+        task_assignments: normalizeAssignments(t.task_assignments),
+      }));
+
+      setTasks(normalizedTaskRows);
+
+      // Pre-fill checkboxes with current assignees
+      const draft: Record<string, string[]> = {};
+      for (const t of normalizedTaskRows) {
+        draft[t.id] = (t.task_assignments ?? []).map((a) => a.assignee_id);
+      }
+      setAssignmentDraft(draft);
     } catch (e: any) {
       setErrorMsg(e.message || "Failed loading tasks.");
     } finally {
@@ -149,14 +207,13 @@ export default function TasksPage() {
     try {
       const { data, error } = await supabase.auth.getUser();
       if (error) throw error;
+
       const user = data.user;
       if (!user) {
         router.push("/login");
         return;
       }
 
-      // Build insert payload.
-      // If user doesn't pick a due date, we OMIT due_at so your DB default (now()) is used.
       const payload: any = {
         title,
         user_id: user.id,
@@ -164,9 +221,7 @@ export default function TasksPage() {
         is_done: false,
       };
 
-      if (newDueDate) {
-        payload.due_at = toISOFromDateInput(newDueDate);
-      }
+      if (newDueDate) payload.due_at = toISOFromDateInput(newDueDate);
 
       const { data: inserted, error: insertErr } = await supabase
         .from("tasks")
@@ -176,7 +231,12 @@ export default function TasksPage() {
 
       if (insertErr) throw insertErr;
 
-      setTasks((prev) => [inserted as TaskRow, ...prev]);
+      const insertedTask: TaskRow = {
+        ...(inserted as any),
+        task_assignments: [],
+      };
+
+      setTasks((prev) => [insertedTask, ...prev]);
       setNewTitle("");
       setNewDueDate("");
     } catch (e: any) {
@@ -186,6 +246,7 @@ export default function TasksPage() {
 
   async function setTaskStatus(taskId: string, status: "open" | "closed") {
     setErrorMsg(null);
+
     try {
       const is_done = status === "closed";
 
@@ -251,21 +312,93 @@ export default function TasksPage() {
 
   async function deleteTask(taskId: string) {
     setErrorMsg(null);
+
     try {
       const { error } = await supabase.from("tasks").delete().eq("id", taskId);
       if (error) throw error;
 
       setTasks((prev) => prev.filter((t) => t.id !== taskId));
+      setAssignmentDraft((prev) => {
+        const copy = { ...prev };
+        delete copy[taskId];
+        return copy;
+      });
+
       if (editTaskId === taskId) cancelEdit();
     } catch (e: any) {
       setErrorMsg(e.message || "Failed deleting task.");
     }
   }
 
+  // Multi-assignment sync: insert missing + delete removed
+  async function syncAssignees(taskId: string, nextIds: string[]) {
+    setErrorMsg(null);
+
+    if (!isAdmin) {
+      setErrorMsg("Only admin can assign tasks.");
+      return;
+    }
+
+    // prevent overlapping saves per task
+    if (savingAssignments[taskId]) return;
+
+    setSavingAssignments((prev) => ({ ...prev, [taskId]: true }));
+
+    try {
+      const currentAssignments = tasks.find((t) => t.id === taskId)?.task_assignments ?? [];
+      const currentIds = currentAssignments.map((a) => a.assignee_id);
+
+      const toAdd = nextIds.filter((id) => !currentIds.includes(id));
+      const toRemove = currentIds.filter((id) => !nextIds.includes(id));
+
+      if (toAdd.length) {
+        const { error: addErr } = await supabase
+          .from("task_assignments")
+          .insert(
+            toAdd.map((uid) => ({
+              task_id: taskId,
+              assignee_id: uid,
+              status: "open",
+            }))
+          );
+        if (addErr) throw addErr;
+      }
+
+      if (toRemove.length) {
+        const { error: delErr } = await supabase
+          .from("task_assignments")
+          .delete()
+          .eq("task_id", taskId)
+          .in("assignee_id", toRemove);
+        if (delErr) throw delErr;
+      }
+
+      await loadSessionAndTasks();
+    } catch (e: any) {
+      setErrorMsg(e.message || "Failed assigning task.");
+    } finally {
+      setSavingAssignments((prev) => ({ ...prev, [taskId]: false }));
+    }
+  }
+
+  function toggleAssignee(taskId: string, assigneeId: string, checked: boolean) {
+    const current = assignmentDraft[taskId] ?? [];
+    const next = checked
+      ? Array.from(new Set([...current, assigneeId]))
+      : current.filter((id) => id !== assigneeId);
+
+    setAssignmentDraft((prev) => ({ ...prev, [taskId]: next }));
+
+    // Save immediately (simple + reliable)
+    void syncAssignees(taskId, next);
+  }
+
   async function signOut() {
     await supabase.auth.signOut();
     router.push("/login");
   }
+
+  const assignableUsers = users.filter((u) => u.id !== userId);
 
   return (
     <div style={styles.page}>
@@ -328,10 +461,17 @@ export default function TasksPage() {
               {openTasks.length === 0 ? (
                 <div style={styles.empty}>No open tasks yet.</div>
               ) : (
-                openTasks.map((t) => (
-                  <div key={t.id} style={styles.taskCard}>
-                    {editTaskId === t.id ? (
-                      <>
+                openTasks.map((t) => {
+                  const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
+                  const assignedLabel =
+                    assignees.length > 0 ? assignees.map(displayUserName).join(", ") : "No";
+
+                  const isSaving = !!savingAssignments[t.id];
+                  const draftIds = assignmentDraft[t.id] ?? assignees;
+
+                  return (
+                    <div key={t.id} style={styles.taskCard}>
+                      {editTaskId === t.id ? (
                         <div style={{ display: "grid", gap: 10 }}>
                           <input
                             style={styles.input}
@@ -358,38 +498,84 @@ export default function TasksPage() {
                             </button>
                           </div>
                         </div>
-                      </>
-                    ) : (
-                      <>
-                        <div style={styles.taskTitle}>{t.title}</div>
+                      ) : (
+                        <>
+                          <div style={styles.taskTitle}>{t.title}</div>
 
-                        <div style={styles.taskMeta}>
-                          <span style={styles.pill}>OPEN</span>
-                          <span style={styles.metaText}>
-                            Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
-                          </span>
-                        </div>
+                          <div style={styles.taskMeta}>
+                            <span style={styles.pill}>OPEN</span>
+                            <span style={styles.metaText}>
+                              Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
+                            </span>
+                            {isSaving && <span style={styles.savingPill}>Saving…</span>}
+                          </div>
 
-                        <div style={styles.metaText}>
-                          Assigned: <b>{t.task_assignments?.length ? "Yes" : "No"}</b>
-                        </div>
+                          <div style={styles.metaText}>Assigned:</div>
+
+                          <div style={styles.assigneePillsWrap}>
+                            {assignees.length === 0 ? (
+                              <span style={{ ...styles.assigneePill, opacity: 0.75 }}>No one</span>
+                            ) : (
+                              assignees.map((uid) => (
+                                <span key={uid} style={styles.assigneePill}>
+                                  {displayUserName(uid)}
+                                </span>
+                              ))
+                            )}
+                          </div>
 
 
-                        <div style={styles.taskActions}>
-                          <button style={styles.smallBtn} onClick={() => startEdit(t)}>
-                            Edit
-                          </button>
-                          <button style={styles.smallBtn} onClick={() => setTaskStatus(t.id, "closed")}>
-                            Complete
-                          </button>
-                          <button style={styles.smallDanger} onClick={() => deleteTask(t.id)}>
-                            Delete
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ))
+                          {isAdmin && (
+                            <div style={{ marginTop: 10 }}>
+                              <div style={styles.assignBox}>
+                                {assignableUsers.length === 0 ? (
+                                  <div style={styles.metaText}>No other users available.</div>
+                                ) : (
+                                  assignableUsers.map((u) => {
+                                    const label = u.full_name || u.email || u.id;
+                                    const checked = draftIds.includes(u.id);
+
+                                    return (
+                                      <label key={u.id} style={styles.checkboxRow}>
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          disabled={isSaving}
+                                          onChange={(e) =>
+                                            toggleAssignee(t.id, u.id, e.currentTarget.checked)
+                                          }
+                                        />
+                                        <span style={{ marginLeft: 10 }}>{label}</span>
+                                      </label>
+                                    );
+                                  })
+                                )}
+                              </div>
+                              <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
+                                Check one or more people to assign this task.
+                              </div>
+                            </div>
+                          )}
+
+                          <div style={styles.taskActions}>
+                            <button style={styles.smallBtn} onClick={() => startEdit(t)}>
+                              Edit
+                            </button>
+                            <button
+                              style={styles.smallBtn}
+                              onClick={() => setTaskStatus(t.id, "closed")}
+                            >
+                              Complete
+                            </button>
+                            <button style={styles.smallDanger} onClick={() => deleteTask(t.id)}>
+                              Delete
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })
               )}
             </section>
 
@@ -399,34 +585,57 @@ export default function TasksPage() {
               {closedTasks.length === 0 ? (
                 <div style={styles.empty}>No closed tasks.</div>
               ) : (
-                closedTasks.map((t) => (
-                  <div key={t.id} style={styles.taskCard}>
-                    <div style={styles.taskTitle}>{t.title}</div>
+                closedTasks.map((t) => {
+                  const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
+                  const assignedLabel =
+                    assignees.length > 0 ? assignees.map(displayUserName).join(", ") : "No";
 
-                    <div style={styles.taskMeta}>
-                      <span style={{ ...styles.pill, opacity: 0.75 }}>CLOSED</span>
-                      <span style={styles.metaText}>
-                        Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
-                      </span>
-                    </div>
+                  return (
+                    <div key={t.id} style={styles.taskCard}>
+                      <div style={styles.taskTitle}>{t.title}</div>
 
-                    <div style={styles.taskActions}>
-                      <button style={styles.smallBtn} onClick={() => setTaskStatus(t.id, "open")}>
-                        Reopen
-                      </button>
-                      <button style={styles.smallDanger} onClick={() => deleteTask(t.id)}>
-                        Delete
-                      </button>
+                      <div style={styles.taskMeta}>
+                        <span style={{ ...styles.pill, opacity: 0.75 }}>CLOSED</span>
+                        <span style={styles.metaText}>
+                          Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
+                        </span>
+                      </div>
+
+                      <div style={styles.metaText}>Assigned:</div>
+
+                      <div style={styles.assigneePillsWrap}>
+                        {assignees.length === 0 ? (
+                          <span style={{ ...styles.assigneePill, opacity: 0.75 }}>No one</span>
+                        ) : (
+                          assignees.map((uid) => (
+                            <span key={uid} style={styles.assigneePill}>
+                              {displayUserName(uid)}
+                            </span>
+                          ))
+                        )}
+                      </div>
+
+
+                      <div style={styles.taskActions}>
+                        <button style={styles.smallBtn} onClick={() => setTaskStatus(t.id, "open")}>
+                          Reopen
+                        </button>
+                        <button style={styles.smallDanger} onClick={() => deleteTask(t.id)}>
+                          Delete
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </section>
           </div>
         )}
 
         <div style={styles.footerNote}>
-          UserId: <span style={{ opacity: 0.85 }}>{userId || "—"}</span>
+          UserId: <span style={{ opacity: 0.85 }}>{userId || "—"}</span> • Admin:{" "}
+          <span style={{ opacity: 0.85 }}>{String(isAdmin)}</span> • Users loaded:{" "}
+          <span style={{ opacity: 0.85 }}>{users.length}</span>
         </div>
       </div>
     </div>
@@ -440,6 +649,26 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#e5e7eb",
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
   },
+
+  assigneePillsWrap: {
+    marginTop: 8,
+    display: "flex",
+    gap: 8,
+    flexWrap: "wrap",
+    alignItems: "center",
+  },
+
+  assigneePill: {
+    fontSize: 11,
+    fontWeight: 800,
+    padding: "4px 8px",
+    borderRadius: 999,
+    background: "rgba(255,255,255,0.10)",
+    border: "1px solid rgba(255,255,255,0.14)",
+    letterSpacing: 0.2,
+    opacity: 0.95,
+  },
+
   shell: { maxWidth: 980, margin: "0 auto", padding: 24 },
   header: {
     display: "flex",
@@ -551,6 +780,16 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.14)",
     letterSpacing: 0.6,
   },
+  savingPill: {
+    fontSize: 11,
+    fontWeight: 800,
+    padding: "4px 8px",
+    borderRadius: 999,
+    background: "rgba(59,130,246,0.18)",
+    border: "1px solid rgba(59,130,246,0.28)",
+    letterSpacing: 0.3,
+    opacity: 0.95,
+  },
   metaText: { fontSize: 12, opacity: 0.9 },
   taskActions: { marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" },
   smallBtn: {
@@ -583,4 +822,25 @@ const styles: Record<string, React.CSSProperties> = {
   },
   muted: { opacity: 0.8, padding: 12 },
   footerNote: { marginTop: 16, fontSize: 12, opacity: 0.8 },
+
+  // Checkbox UI
+  assignBox: {
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(0,0,0,0.18)",
+    padding: 10,
+    display: "grid",
+    gap: 8,
+    maxHeight: 170,
+    overflow: "auto",
+  },
+  checkboxRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    fontSize: 13,
+    opacity: 0.95,
+    cursor: "pointer",
+    userSelect: "none",
+  },
 };
