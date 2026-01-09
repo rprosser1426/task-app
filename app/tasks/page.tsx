@@ -12,7 +12,20 @@ type TaskRow = {
   due_at: string; // timestamp string
   user_id: string;
   created_at: string | null;
+  task_assignments?: AssignmentRow[];
+
 };
+
+type AssignmentRow = {
+  id: string;
+  task_id: string;
+  assignee_id: string;
+  status: string | null;
+  completed_at: string | null;
+  completion_note: string | null;
+  created_at: string;
+};
+
 
 function toISOFromDateInput(dateStr: string) {
   // dateStr is "YYYY-MM-DD"
@@ -82,9 +95,27 @@ export default function TasksPage() {
 
       const { data: taskData, error: taskErr } = await supabase
         .from("tasks")
-        .select("id,title,status,is_done,due_at,user_id,created_at")
-        .eq("user_id", user.id)
+        .select(`
+    id,
+    title,
+    status,
+    is_done,
+    due_at,
+    user_id,
+    created_at,
+    task_assignments (
+      id,
+      task_id,
+      assignee_id,
+      status,
+      completed_at,
+      completion_note,
+      created_at
+    )
+  `)
         .order("created_at", { ascending: false });
+
+
 
       if (taskErr) throw taskErr;
 
@@ -338,6 +369,11 @@ export default function TasksPage() {
                             Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
                           </span>
                         </div>
+
+                        <div style={styles.metaText}>
+                          Assigned: <b>{t.task_assignments?.length ? "Yes" : "No"}</b>
+                        </div>
+
 
                         <div style={styles.taskActions}>
                           <button style={styles.smallBtn} onClick={() => startEdit(t)}>

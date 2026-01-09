@@ -3,6 +3,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
+type AssignmentRow = {
+  id: string;
+  task_id: string;
+  assignee_id: string;
+  status: string | null;
+  completed: boolean | null;
+  completed_at: string | null;
+  completion_note: string | null;
+  created_at: string;
+};
+
 type TaskRow = {
   id: string;
   user_id: string;
@@ -11,9 +22,12 @@ type TaskRow = {
   created_at: string;
   due_at: string | null;
   notes: string | null;
+  task_assignments?: AssignmentRow[];
 };
 
 export default function TaskBoard() {
+  console.log("✅ TaskBoard.tsx LOADED (the one Rick edited)");
+
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [newTitle, setNewTitle] = useState("");
   const [loading, setLoading] = useState(true);
@@ -31,7 +45,25 @@ export default function TaskBoard() {
 
     const { data, error } = await supabase
       .from("tasks")
-      .select("id,user_id,title,is_done,created_at,due_at,notes")
+      .select(`
+        id,
+        user_id,
+        title,
+        is_done,
+        created_at,
+        due_at,
+        notes,
+        task_assignments (
+          id,
+          task_id,
+          assignee_id,
+          status,
+          completed,
+          completed_at,
+          completion_note,
+          created_at
+        )
+      `)
       .order("created_at", { ascending: false });
 
     if (error) setError(error.message);
@@ -43,7 +75,6 @@ export default function TaskBoard() {
   useEffect(() => {
     loadTasks();
 
-    // Optional: auto-refresh when auth changes
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
       loadTasks();
     });
@@ -79,7 +110,25 @@ export default function TaskBoard() {
         title,
         is_done: false,
       })
-      .select("id,user_id,title,is_done,created_at,due_at,notes")
+      .select(`
+        id,
+        user_id,
+        title,
+        is_done,
+        created_at,
+        due_at,
+        notes,
+        task_assignments (
+          id,
+          task_id,
+          assignee_id,
+          status,
+          completed,
+          completed_at,
+          completion_note,
+          created_at
+        )
+      `)
       .single();
 
     if (error) {
@@ -121,7 +170,6 @@ export default function TaskBoard() {
   const deleteTask = async (taskId: string) => {
     setError(null);
 
-    // optimistic UI
     const before = tasks;
     setTasks((prev) => prev.filter((t) => t.id !== taskId));
 
@@ -162,14 +210,12 @@ export default function TaskBoard() {
       </div>
 
       <div style={{ marginTop: 10, fontSize: 14, opacity: 0.8 }}>
-        {loading ? "Loading tasks..." : `${remaining} remaining • ${tasks.length} total`}
+        {loading
+          ? "Loading tasks..."
+          : `${remaining} remaining • ${tasks.length} total`}
       </div>
 
-      {error && (
-        <div style={{ marginTop: 10, color: "crimson" }}>
-          {error}
-        </div>
-      )}
+      {error && <div style={{ marginTop: 10, color: "crimson" }}>{error}</div>}
 
       <ul style={{ marginTop: 14, paddingLeft: 0, listStyle: "none" }}>
         {tasks.map((t) => (
@@ -201,8 +247,13 @@ export default function TaskBoard() {
               >
                 {t.title}
               </div>
+
               <div style={{ fontSize: 12, opacity: 0.7 }}>
                 Created: {new Date(t.created_at).toLocaleString()}
+              </div>
+
+              <div style={{ fontSize: 12, opacity: 0.7 }}>
+                Assigned: {t.task_assignments?.length ? "Yes" : "No"}
               </div>
             </div>
 

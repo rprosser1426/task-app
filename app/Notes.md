@@ -37,8 +37,16 @@
 http://localhost:3000/login
 
 
-## Github
+## Github (Type each one at a time be sure to add the git add .)
 
-git add .
+git add .    
 git commit -m "Short description of what I changed"
 git push
+
+
+
+📊 Recommended Setup (for 5 users)
+Component	Tier	Cost
+Supabase (Database & Auth)	Free	$0/mo
+Vercel (App hosting)	Free	$0/mo
+Total Monthly Cost	—	$0/mo
