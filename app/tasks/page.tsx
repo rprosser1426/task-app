@@ -65,6 +65,7 @@ export default function TasksPage() {
 
   const [newTitle, setNewTitle] = useState("");
   const [newDueDate, setNewDueDate] = useState<string>("");
+  const [newAssigneeId, setNewAssigneeId] = useState<string>("");
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -83,14 +84,17 @@ export default function TasksPage() {
   // Collapse/Expand: only one open at a time (keeps UI tidy)
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
 
-  const openTasks = useMemo(
-    () => tasks.filter((t) => (t.status ?? "open") !== "closed"),
-    [tasks]
-  );
-  const closedTasks = useMemo(
-    () => tasks.filter((t) => (t.status ?? "open") === "closed"),
-    [tasks]
-  );
+  // Admin: expand/collapse users (one open at a time)
+  const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
+
+  function toggleExpandedUser(uid: string) {
+    setExpandedUserId((prev) => (prev === uid ? null : uid));
+    setExpandedTaskId(null);
+  }
+
+  function isTaskOpen(t: TaskRow) {
+    return (t.status ?? "open") !== "closed";
+  }
 
   function displayUserName(uid: string) {
     const u = users.find((x) => x.id === uid);
@@ -103,6 +107,55 @@ export default function TasksPage() {
     if (!raw) return [];
     return [raw as AssignmentRow];
   }
+
+  const openTasks = useMemo(
+    () => tasks.filter((t) => (t.status ?? "open") !== "closed"),
+    [tasks]
+  );
+
+  const closedTasks = useMemo(
+    () => tasks.filter((t) => (t.status ?? "open") === "closed"),
+    [tasks]
+  );
+
+  // ✅ Unassigned tasks (no assignees)
+  const unassignedTasks = useMemo(() => {
+    return tasks
+      .filter((t) => (t.task_assignments ?? []).length === 0)
+      .sort((a, b) => {
+        const aa = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const bb = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return bb - aa;
+      });
+  }, [tasks]);
+
+  // ✅ Assigned tasks grouped by assignee
+  const tasksByAssignee = useMemo(() => {
+    const map = new Map<string, TaskRow[]>();
+
+    for (const t of tasks) {
+      const assigneeIds = (t.task_assignments ?? []).map((a) => a.assignee_id);
+      if (assigneeIds.length === 0) continue; // assigned-only buckets
+
+      for (const uid of assigneeIds) {
+        if (!map.has(uid)) map.set(uid, []);
+        map.get(uid)!.push(t);
+      }
+    }
+
+    for (const [k, arr] of map.entries()) {
+      arr.sort((a, b) => {
+        const aa = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const bb = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return bb - aa;
+      });
+
+      // de-dupe safety
+      map.set(k, Array.from(new Map(arr.map((t) => [t.id, t])).values()));
+    }
+
+    return map;
+  }, [tasks]);
 
   async function loadSessionAndTasks() {
     setErrorMsg(null);
@@ -133,7 +186,7 @@ export default function TasksPage() {
       const admin = (myProfile?.role ?? "").toLowerCase() === "admin";
       setIsAdmin(admin);
 
-      // Load users (for assignment list)
+      // Load users
       const { data: profileData, error: profilesErr } = await supabase
         .from("profiles")
         .select("id,email,full_name,role")
@@ -222,7 +275,7 @@ export default function TasksPage() {
 
       const payload: any = {
         title,
-        user_id: user.id,
+        user_id: user.id, // creator
         status: "open",
         is_done: false,
         note: null,
@@ -237,16 +290,25 @@ export default function TasksPage() {
         .single();
 
       if (insertErr) throw insertErr;
+      if (!inserted?.id) throw new Error("Task insert did not return an id.");
 
-      const insertedTask: TaskRow = {
-        ...(inserted as any),
-        note: (inserted as any)?.note ?? null,
-        task_assignments: [],
-      };
+      // If admin selected an assignee, create assignment row immediately
+      if (isAdmin && newAssigneeId) {
+        const { error: assignErr } = await supabase.from("task_assignments").insert({
+          task_id: inserted.id,
+          assignee_id: newAssigneeId,
+          status: "open",
+        });
+        if (assignErr) throw assignErr;
+      }
 
-      setTasks((prev) => [insertedTask, ...prev]);
+      // Clear inputs
       setNewTitle("");
       setNewDueDate("");
+      setNewAssigneeId("");
+
+      // Reload so it appears in Team bucket or Unassigned bucket
+      await loadSessionAndTasks();
     } catch (e: any) {
       setErrorMsg(e.message || "Failed to add task.");
     }
@@ -258,18 +320,10 @@ export default function TasksPage() {
     try {
       const is_done = status === "closed";
 
-      const { error } = await supabase
-        .from("tasks")
-        .update({ status, is_done })
-        .eq("id", taskId);
-
+      const { error } = await supabase.from("tasks").update({ status, is_done }).eq("id", taskId);
       if (error) throw error;
 
-      setTasks((prev) =>
-        prev.map((t) => (t.id === taskId ? { ...t, status, is_done } : t))
-      );
-
-      // If we close it while expanded, collapse it
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status, is_done } : t)));
       setExpandedTaskId((prev) => (prev === taskId ? null : prev));
     } catch (e: any) {
       setErrorMsg(e.message || "Failed updating task.");
@@ -281,7 +335,6 @@ export default function TasksPage() {
     setEditTitle(t.title);
     setEditDueDate(t.due_at ? toDateInputFromISO(t.due_at) : "");
     setEditNote(t.note ?? "");
-    // Ensure it is expanded while editing
     setExpandedTaskId(t.id);
   }
 
@@ -309,17 +362,10 @@ export default function TasksPage() {
       const due_at = toISOFromDateInput(editDueDate);
       const note = editNote.trim() ? editNote.trim() : null;
 
-      const { error } = await supabase
-        .from("tasks")
-        .update({ title, due_at, note })
-        .eq("id", taskId);
-
+      const { error } = await supabase.from("tasks").update({ title, due_at, note }).eq("id", taskId);
       if (error) throw error;
 
-      setTasks((prev) =>
-        prev.map((t) => (t.id === taskId ? { ...t, title, due_at, note } : t))
-      );
-
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, title, due_at, note } : t)));
       cancelEdit();
     } catch (e: any) {
       setErrorMsg(e.message || "Failed saving edit.");
@@ -341,14 +387,12 @@ export default function TasksPage() {
       });
 
       if (editTaskId === taskId) cancelEdit();
-
       setExpandedTaskId((prev) => (prev === taskId ? null : prev));
     } catch (e: any) {
       setErrorMsg(e.message || "Failed deleting task.");
     }
   }
 
-  // Multi-assignment sync: insert missing + delete removed
   async function syncAssignees(taskId: string, nextIds: string[]) {
     setErrorMsg(null);
 
@@ -370,13 +414,7 @@ export default function TasksPage() {
       if (toAdd.length) {
         const { error: addErr } = await supabase
           .from("task_assignments")
-          .insert(
-            toAdd.map((uid) => ({
-              task_id: taskId,
-              assignee_id: uid,
-              status: "open",
-            }))
-          );
+          .insert(toAdd.map((uid) => ({ task_id: taskId, assignee_id: uid, status: "open" })));
         if (addErr) throw addErr;
       }
 
@@ -399,9 +437,7 @@ export default function TasksPage() {
 
   function toggleAssignee(taskId: string, assigneeId: string, checked: boolean) {
     const current = assignmentDraft[taskId] ?? [];
-    const next = checked
-      ? Array.from(new Set([...current, assigneeId]))
-      : current.filter((id) => id !== assigneeId);
+    const next = checked ? Array.from(new Set([...current, assigneeId])) : current.filter((id) => id !== assigneeId);
 
     setAssignmentDraft((prev) => ({ ...prev, [taskId]: next }));
     void syncAssignees(taskId, next);
@@ -415,8 +451,190 @@ export default function TasksPage() {
   const assignableUsers = users.filter((u) => u.id !== userId);
 
   function toggleExpanded(taskId: string) {
-    // Don't toggle collapse while editing another task
     setExpandedTaskId((prev) => (prev === taskId ? null : taskId));
+  }
+
+  function renderTaskCard(t: TaskRow) {
+    const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
+    const isSaving = !!savingAssignments[t.id];
+    const draftIds = assignmentDraft[t.id] ?? assignees;
+    const isExpanded = expandedTaskId === t.id;
+
+    const isClosed = (t.status ?? "open") === "closed";
+
+    return (
+      <div
+        key={t.id}
+        style={{
+          ...styles.taskCard,
+          ...(isExpanded ? styles.taskCardExpanded : null),
+          ...(isClosed ? { opacity: 0.95 } : null),
+        }}
+        onClick={() => toggleExpanded(t.id)}
+      >
+        <div style={styles.taskTopRow}>
+          <div style={styles.taskTitle}>{t.title}</div>
+          <div style={styles.chev}>{isExpanded ? "▲" : "▼"}</div>
+        </div>
+
+        <div style={styles.taskMeta}>
+          <span style={{ ...styles.pill, opacity: isClosed ? 0.75 : 1 }}>{isClosed ? "CLOSED" : "OPEN"}</span>
+          <span style={styles.metaText}>
+            Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
+          </span>
+          {!isClosed && isSaving && <span style={styles.savingPill}>Saving…</span>}
+        </div>
+
+        <div style={styles.assigneePillsWrap}>
+          {assignees.length === 0 ? (
+            <span style={{ ...styles.assigneePill, opacity: 0.75 }}>No one</span>
+          ) : (
+            assignees.map((uid) => (
+              <span key={uid} style={styles.assigneePill}>
+                {displayUserName(uid)}
+              </span>
+            ))
+          )}
+        </div>
+
+        {isExpanded && (
+          <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+            {editTaskId === t.id ? (
+              <div style={{ display: "grid", gap: 10 }}>
+                <input style={styles.input} value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
+
+                <input
+                  style={styles.dateInputWide}
+                  type="date"
+                  value={editDueDate}
+                  onChange={(e) => setEditDueDate(e.target.value)}
+                />
+
+                <textarea
+                  value={editNote}
+                  onChange={(e) => setEditNote(e.target.value)}
+                  placeholder="Add a note for this task…"
+                  style={styles.textarea}
+                />
+
+                <div style={styles.taskActions}>
+                  <button
+                    style={styles.smallBtn}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      saveEdit(t.id);
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button
+                    style={styles.smallBtn}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      cancelEdit();
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    style={styles.smallDanger}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteTask(t.id);
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                {t.note ? (
+                  <div style={{ ...styles.metaText, whiteSpace: "pre-wrap" }}>
+                    <span style={{ opacity: 0.8 }}>Note: </span>
+                    <b>{t.note}</b>
+                  </div>
+                ) : null}
+
+                {isAdmin && !isClosed && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={styles.assignBox}>
+                      {assignableUsers.length === 0 ? (
+                        <div style={styles.metaText}>No other users available.</div>
+                      ) : (
+                        assignableUsers.map((u) => {
+                          const label = u.full_name || u.email || u.id;
+                          const checked = draftIds.includes(u.id);
+
+                          return (
+                            <label key={u.id} style={styles.checkboxRow}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={isSaving}
+                                onChange={(e) => toggleAssignee(t.id, u.id, e.currentTarget.checked)}
+                              />
+                              <span style={{ marginLeft: 10 }}>{label}</span>
+                            </label>
+                          );
+                        })
+                      )}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
+                      Check one or more people to assign this task.
+                    </div>
+                  </div>
+                )}
+
+                <div style={styles.taskActions}>
+                  <button
+                    style={styles.smallBtn}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      startEdit(t);
+                    }}
+                  >
+                    Edit
+                  </button>
+
+                  {!isClosed ? (
+                    <button
+                      style={styles.smallBtn}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTaskStatus(t.id, "closed");
+                      }}
+                    >
+                      Complete
+                    </button>
+                  ) : (
+                    <button
+                      style={styles.smallBtn}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTaskStatus(t.id, "open");
+                      }}
+                    >
+                      Reopen
+                    </button>
+                  )}
+
+                  <button
+                    style={styles.smallDanger}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteTask(t.id);
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -458,6 +676,22 @@ export default function TasksPage() {
               title="Due date (optional — if blank, defaults to now)"
             />
 
+            {isAdmin && (
+              <select
+                style={styles.dateInput}
+                value={newAssigneeId}
+                onChange={(e) => setNewAssigneeId(e.target.value)}
+                title="Assign this task to someone (optional)"
+              >
+                <option value="">Assign to… (optional)</option>
+                {assignableUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.full_name || u.email || u.id}
+                  </option>
+                ))}
+              </select>
+            )}
+
             <button
               style={{ ...styles.primaryBtn, opacity: newTitle.trim() ? 1 : 0.6 }}
               disabled={!newTitle.trim()}
@@ -472,273 +706,112 @@ export default function TasksPage() {
 
         {loading ? (
           <div style={styles.muted}>Loading…</div>
-        ) : (
-          <div style={styles.grid}>
-            {/* OPEN */}
-            <section style={styles.column}>
-              <div style={styles.colTitle}>Open</div>
+        ) : isAdmin ? (
+          <div style={styles.column}>
+            <div style={styles.colTitle}>Team</div>
 
-              {openTasks.length === 0 ? (
-                <div style={styles.empty}>No open tasks yet.</div>
-              ) : (
-                openTasks.map((t) => {
-                  const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
-                  const isSaving = !!savingAssignments[t.id];
-                  const draftIds = assignmentDraft[t.id] ?? assignees;
+            {users.length === 0 ? (
+              <div style={styles.empty}>No users found.</div>
+            ) : (
+              <>
+                {/* UNASSIGNED bucket */}
+                <div
+                  style={{
+                    ...styles.taskCard,
+                    ...(expandedUserId === "__unassigned__" ? styles.taskCardExpanded : null),
+                    cursor: "pointer",
+                  }}
+                  onClick={() => toggleExpandedUser("__unassigned__")}
+                >
+                  <div style={styles.taskTopRow}>
+                    <div style={{ display: "grid", gap: 2 }}>
+                      <div style={styles.taskTitle}>Unassigned</div>
+                      <div style={{ fontSize: 12, opacity: 0.85 }}>
+                        Open: <b>{unassignedTasks.filter(isTaskOpen).length}</b> • Closed:{" "}
+                        <b>{unassignedTasks.filter((t) => !isTaskOpen(t)).length}</b>
+                      </div>
+                    </div>
+                    <div style={styles.chev}>{expandedUserId === "__unassigned__" ? "▲" : "▼"}</div>
+                  </div>
 
-                  const isExpanded = expandedTaskId === t.id;
+                  {expandedUserId === "__unassigned__" && (
+                    <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+                      {unassignedTasks.length === 0 ? (
+                        <div style={styles.empty}>No unassigned tasks.</div>
+                      ) : (
+                        <>
+                          {unassignedTasks.filter(isTaskOpen).map(renderTaskCard)}
+                          {unassignedTasks.filter((t) => !isTaskOpen(t)).map(renderTaskCard)}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* USERS */}
+                {users.map((u) => {
+                  const uid = u.id;
+                  const userTasks = tasksByAssignee.get(uid) ?? [];
+                  const openCount = userTasks.filter(isTaskOpen).length;
+                  const closedCount = userTasks.length - openCount;
+
+                  const isUserExpanded = expandedUserId === uid;
 
                   return (
                     <div
-                      key={t.id}
+                      key={uid}
                       style={{
                         ...styles.taskCard,
-                        ...(isExpanded ? styles.taskCardExpanded : null),
+                        ...(isUserExpanded ? styles.taskCardExpanded : null),
+                        cursor: "pointer",
                       }}
-                      onClick={() => toggleExpanded(t.id)}
+                      onClick={() => toggleExpandedUser(uid)}
                     >
-                      {/* ALWAYS VISIBLE (compact) */}
                       <div style={styles.taskTopRow}>
-                        <div style={styles.taskTitle}>{t.title}</div>
-                        <div style={styles.chev}>{isExpanded ? "▲" : "▼"}</div>
+                        <div style={{ display: "grid", gap: 2 }}>
+                          <div style={styles.taskTitle}>{u.full_name || u.email || uid}</div>
+                          <div style={{ fontSize: 12, opacity: 0.85 }}>
+                            Open: <b>{openCount}</b> • Closed: <b>{closedCount}</b>
+                          </div>
+                        </div>
+                        <div style={styles.chev}>{isUserExpanded ? "▲" : "▼"}</div>
                       </div>
 
-                      <div style={styles.taskMeta}>
-                        <span style={styles.pill}>OPEN</span>
-                        <span style={styles.metaText}>
-                          Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
-                        </span>
-                        {isSaving && <span style={styles.savingPill}>Saving…</span>}
-                      </div>
-
-                      <div style={styles.assigneePillsWrap}>
-                        {assignees.length === 0 ? (
-                          <span style={{ ...styles.assigneePill, opacity: 0.75 }}>No one</span>
-                        ) : (
-                          assignees.map((uid) => (
-                            <span key={uid} style={styles.assigneePill}>
-                              {displayUserName(uid)}
-                            </span>
-                          ))
-                        )}
-                      </div>
-
-                      {/* EXPANDED CONTENT */}
-                      {isExpanded && (
+                      {isUserExpanded && (
                         <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
-                          {editTaskId === t.id ? (
-                            <div style={{ display: "grid", gap: 10 }}>
-                              <input
-                                style={styles.input}
-                                value={editTitle}
-                                onChange={(e) => setEditTitle(e.target.value)}
-                              />
-
-                              <input
-                                style={styles.dateInputWide}
-                                type="date"
-                                value={editDueDate}
-                                onChange={(e) => setEditDueDate(e.target.value)}
-                              />
-
-                              <textarea
-                                value={editNote}
-                                onChange={(e) => setEditNote(e.target.value)}
-                                placeholder="Add a note for this task…"
-                                style={styles.textarea}
-                              />
-
-                              <div style={styles.taskActions}>
-                                <button
-                                  style={styles.smallBtn}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    saveEdit(t.id);
-                                  }}
-                                >
-                                  Save
-                                </button>
-                                <button
-                                  style={styles.smallBtn}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    cancelEdit();
-                                  }}
-                                >
-                                  Cancel
-                                </button>
-                                <button
-                                  style={styles.smallDanger}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    deleteTask(t.id);
-                                  }}
-                                >
-                                  Delete
-                                </button>
-                              </div>
-                            </div>
+                          {userTasks.length === 0 ? (
+                            <div style={styles.empty}>No tasks for this user.</div>
                           ) : (
                             <>
-                              {t.note ? (
-                                <div style={{ ...styles.metaText, whiteSpace: "pre-wrap" }}>
-                                  <span style={{ opacity: 0.8 }}>Note: </span>
-                                  <b>{t.note}</b>
-                                </div>
-                              ) : null}
-
-                              {isAdmin && (
-                                <div style={{ marginTop: 10 }}>
-                                  <div style={styles.assignBox}>
-                                    {assignableUsers.length === 0 ? (
-                                      <div style={styles.metaText}>No other users available.</div>
-                                    ) : (
-                                      assignableUsers.map((u) => {
-                                        const label = u.full_name || u.email || u.id;
-                                        const checked = draftIds.includes(u.id);
-
-                                        return (
-                                          <label key={u.id} style={styles.checkboxRow}>
-                                            <input
-                                              type="checkbox"
-                                              checked={checked}
-                                              disabled={isSaving}
-                                              onChange={(e) =>
-                                                toggleAssignee(t.id, u.id, e.currentTarget.checked)
-                                              }
-                                            />
-                                            <span style={{ marginLeft: 10 }}>{label}</span>
-                                          </label>
-                                        );
-                                      })
-                                    )}
-                                  </div>
-                                  <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
-                                    Check one or more people to assign this task.
-                                  </div>
-                                </div>
-                              )}
-
-                              <div style={styles.taskActions}>
-                                <button
-                                  style={styles.smallBtn}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    startEdit(t);
-                                  }}
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  style={styles.smallBtn}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setTaskStatus(t.id, "closed");
-                                  }}
-                                >
-                                  Complete
-                                </button>
-                                <button
-                                  style={styles.smallDanger}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    deleteTask(t.id);
-                                  }}
-                                >
-                                  Delete
-                                </button>
-                              </div>
+                              {userTasks.filter(isTaskOpen).map(renderTaskCard)}
+                              {userTasks.filter((t) => !isTaskOpen(t)).map(renderTaskCard)}
                             </>
                           )}
                         </div>
                       )}
                     </div>
                   );
-                })
+                })}
+              </>
+            )}
+          </div>
+        ) : (
+          <div style={styles.grid}>
+            <section style={styles.column}>
+              <div style={styles.colTitle}>Open</div>
+              {openTasks.length === 0 ? (
+                <div style={styles.empty}>No open tasks yet.</div>
+              ) : (
+                openTasks.map(renderTaskCard)
               )}
             </section>
 
-            {/* CLOSED */}
             <section style={styles.column}>
               <div style={styles.colTitle}>Closed</div>
-
               {closedTasks.length === 0 ? (
                 <div style={styles.empty}>No closed tasks.</div>
               ) : (
-                closedTasks.map((t) => {
-                  const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
-                  const isExpanded = expandedTaskId === t.id;
-
-                  return (
-                    <div
-                      key={t.id}
-                      style={{
-                        ...styles.taskCard,
-                        ...(isExpanded ? styles.taskCardExpanded : null),
-                        opacity: 0.95,
-                      }}
-                      onClick={() => toggleExpanded(t.id)}
-                    >
-                      {/* ALWAYS VISIBLE (compact) */}
-                      <div style={styles.taskTopRow}>
-                        <div style={styles.taskTitle}>{t.title}</div>
-                        <div style={styles.chev}>{isExpanded ? "▲" : "▼"}</div>
-                      </div>
-
-                      <div style={styles.taskMeta}>
-                        <span style={{ ...styles.pill, opacity: 0.75 }}>CLOSED</span>
-                        <span style={styles.metaText}>
-                          Due: <b>{t.due_at ? formatDue(t.due_at) : "—"}</b>
-                        </span>
-                      </div>
-
-                      <div style={styles.assigneePillsWrap}>
-                        {assignees.length === 0 ? (
-                          <span style={{ ...styles.assigneePill, opacity: 0.75 }}>No one</span>
-                        ) : (
-                          assignees.map((uid) => (
-                            <span key={uid} style={styles.assigneePill}>
-                              {displayUserName(uid)}
-                            </span>
-                          ))
-                        )}
-                      </div>
-
-                      {/* EXPANDED CONTENT */}
-                      {isExpanded && (
-                        <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
-                          {t.note ? (
-                            <div style={{ ...styles.metaText, whiteSpace: "pre-wrap" }}>
-                              <span style={{ opacity: 0.8 }}>Note: </span>
-                              <b>{t.note}</b>
-                            </div>
-                          ) : null}
-
-                          <div style={styles.taskActions}>
-                            <button
-                              style={styles.smallBtn}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setTaskStatus(t.id, "open");
-                              }}
-                            >
-                              Reopen
-                            </button>
-                            <button
-                              style={styles.smallDanger}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                deleteTask(t.id);
-                              }}
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
+                closedTasks.map(renderTaskCard)
               )}
             </section>
           </div>
@@ -983,7 +1056,6 @@ const styles: Record<string, React.CSSProperties> = {
 
   footerNote: { marginTop: 16, fontSize: 12, opacity: 0.8 },
 
-  // Checkbox UI
   assignBox: {
     borderRadius: 12,
     border: "1px solid rgba(255,255,255,0.12)",
@@ -1005,7 +1077,6 @@ const styles: Record<string, React.CSSProperties> = {
     userSelect: "none",
   },
 
-  // Pills
   assigneePillsWrap: {
     marginTop: 8,
     display: "flex",
