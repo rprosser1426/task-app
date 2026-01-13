@@ -2,19 +2,33 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
+function safeRedirectPath(path: string) {
+  // Only allow internal redirects
+  if (!path || typeof path !== "string") return "/";
+  if (!path.startsWith("/")) return "/";
+  // prevent protocol-relative like //evil.com
+  if (path.startsWith("//")) return "/";
+  return path;
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
+
   const code = url.searchParams.get("code");
 
-  // Where to send the user after session is created
-  const redirectTo = url.searchParams.get("redirectTo") ?? "/";
+  // support either redirectTo or next
+  const redirectToRaw =
+    url.searchParams.get("redirectTo") ??
+    url.searchParams.get("next") ??
+    "/";
+
+  const redirectTo = safeRedirectPath(redirectToRaw);
 
   if (!code) {
-    // If there's no code, bounce to login (or home)
     return NextResponse.redirect(new URL("/login", url.origin));
   }
 
-  const cookieStore = cookies();
+  const cookieStore = await cookies(); // ✅ use await (works across Next versions)
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -24,17 +38,24 @@ export async function GET(request: Request) {
         getAll() {
           return cookieStore.getAll();
         },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) => {
+        setAll(cookiesToSet: Array<{ name: string; value: string; options: any }>) {
+
+          for (const { name, value, options } of cookiesToSet) {
             cookieStore.set(name, value, options);
-          });
+          }
         },
       },
     }
   );
 
-  // This is the key line: turns the "code" into a session cookie
-  await supabase.auth.exchangeCodeForSession(code); // :contentReference[oaicite:1]{index=1}
+  const { error } = await supabase.auth.exchangeCodeForSession(code);
+
+  if (error) {
+    // If exchange fails, bounce to login with a hint
+    const errUrl = new URL("/login", url.origin);
+    errUrl.searchParams.set("error", "oauth_exchange_failed");
+    return NextResponse.redirect(errUrl);
+  }
 
   return NextResponse.redirect(new URL(redirectTo, url.origin));
 }
