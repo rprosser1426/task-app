@@ -86,6 +86,8 @@ export default function TasksPage() {
 
   // Admin: expand/collapse users (one open at a time)
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
+  const [showClosed, setShowClosed] = useState(true);
+
 
   function toggleExpandedUser(uid: string) {
     setExpandedUserId((prev) => (prev === uid ? null : uid));
@@ -108,15 +110,9 @@ export default function TasksPage() {
     return [raw as AssignmentRow];
   }
 
-  const openTasks = useMemo(
-    () => tasks.filter((t) => (t.status ?? "open") !== "closed"),
-    [tasks]
-  );
+  const openTasks = useMemo(() => tasks.filter((t) => (t.status ?? "open") !== "closed"), [tasks]);
 
-  const closedTasks = useMemo(
-    () => tasks.filter((t) => (t.status ?? "open") === "closed"),
-    [tasks]
-  );
+  const closedTasks = useMemo(() => tasks.filter((t) => (t.status ?? "open") === "closed"), [tasks]);
 
   // ✅ Unassigned tasks (no assignees)
   const unassignedTasks = useMemo(() => {
@@ -448,7 +444,14 @@ export default function TasksPage() {
     router.push("/login");
   }
 
-  const assignableUsers = users.filter((u) => u.id !== userId);
+  // ✅ FIXED: assignableUsers includes me, puts me first, and is stable even if userId hasn't loaded yet
+  const assignableUsers = useMemo(() => {
+    if (!userId) return users;
+
+    const me = users.find((u) => u.id === userId);
+    const others = users.filter((u) => u.id !== userId);
+    return me ? [me, ...others] : others;
+  }, [users, userId]);
 
   function toggleExpanded(taskId: string) {
     setExpandedTaskId((prev) => (prev === taskId ? null : taskId));
@@ -472,6 +475,22 @@ export default function TasksPage() {
         }}
         onClick={() => toggleExpanded(t.id)}
       >
+
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            borderTopLeftRadius: 14,
+            borderBottomLeftRadius: 14,
+            background:
+              (t.status ?? "open") === "closed"
+                ? "rgba(255,255,255,0.14)"
+                : "rgba(59,130,246,0.35)",
+          }}
+        />
         <div style={styles.taskTopRow}>
           <div style={styles.taskTitle}>{t.title}</div>
           <div style={styles.chev}>{isExpanded ? "▲" : "▼"}</div>
@@ -563,7 +582,7 @@ export default function TasksPage() {
                         <div style={styles.metaText}>No other users available.</div>
                       ) : (
                         assignableUsers.map((u) => {
-                          const label = u.full_name || u.email || u.id;
+                          const label = (u.full_name || u.email || u.id) + (u.id === userId ? " (me)" : "");
                           const checked = draftIds.includes(u.id);
 
                           return (
@@ -580,9 +599,7 @@ export default function TasksPage() {
                         })
                       )}
                     </div>
-                    <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
-                      Check one or more people to assign this task.
-                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>Check one or more people to assign this task.</div>
                   </div>
                 )}
 
@@ -658,6 +675,14 @@ export default function TasksPage() {
 
         <div style={styles.card}>
           <div style={styles.row}>
+
+            <button
+              style={styles.smallBtn}
+              onClick={() => setShowClosed((prev) => !prev)}
+            >
+              {showClosed ? "Hide Closed" : "Show Closed"}
+            </button>
+
             <input
               style={styles.input}
               placeholder="Add a new task…"
@@ -686,7 +711,7 @@ export default function TasksPage() {
                 <option value="">Assign to… (optional)</option>
                 {assignableUsers.map((u) => (
                   <option key={u.id} value={u.id}>
-                    {u.full_name || u.email || u.id}
+                    {(u.full_name || u.email || u.id) + (u.id === userId ? " (me)" : "")}
                   </option>
                 ))}
               </select>
@@ -741,7 +766,8 @@ export default function TasksPage() {
                       ) : (
                         <>
                           {unassignedTasks.filter(isTaskOpen).map(renderTaskCard)}
-                          {unassignedTasks.filter((t) => !isTaskOpen(t)).map(renderTaskCard)}
+                          {showClosed && unassignedTasks.filter((t) => !isTaskOpen(t)).map(renderTaskCard)}
+
                         </>
                       )}
                     </div>
@@ -784,7 +810,8 @@ export default function TasksPage() {
                           ) : (
                             <>
                               {userTasks.filter(isTaskOpen).map(renderTaskCard)}
-                              {userTasks.filter((t) => !isTaskOpen(t)).map(renderTaskCard)}
+                              {showClosed && userTasks.filter((t) => !isTaskOpen(t)).map(renderTaskCard)}
+
                             </>
                           )}
                         </div>
@@ -799,20 +826,16 @@ export default function TasksPage() {
           <div style={styles.grid}>
             <section style={styles.column}>
               <div style={styles.colTitle}>Open</div>
-              {openTasks.length === 0 ? (
-                <div style={styles.empty}>No open tasks yet.</div>
-              ) : (
-                openTasks.map(renderTaskCard)
-              )}
+              {openTasks.length === 0 ? <div style={styles.empty}>No open tasks yet.</div> : <>
+                {openTasks.map(renderTaskCard)}
+                {showClosed && closedTasks.map(renderTaskCard)}
+              </>
+              }
             </section>
 
             <section style={styles.column}>
               <div style={styles.colTitle}>Closed</div>
-              {closedTasks.length === 0 ? (
-                <div style={styles.empty}>No closed tasks.</div>
-              ) : (
-                closedTasks.map(renderTaskCard)
-              )}
+              {closedTasks.length === 0 ? <div style={styles.empty}>No closed tasks yet.</div> : closedTasks.map(renderTaskCard)}
             </section>
           </div>
         )}
@@ -959,18 +982,24 @@ const styles: Record<string, React.CSSProperties> = {
   colTitle: { fontSize: 14, fontWeight: 800, opacity: 0.9, marginBottom: 10 },
 
   taskCard: {
+    position: "relative",
     borderRadius: 14,
-    padding: 12,
+    padding: "12px 12px 12px 16px",                 // ✅ extra left padding
     background: "rgba(0,0,0,0.22)",
-    border: "1px solid rgba(255,255,255,0.10)",
-    marginBottom: 10,
+    border: "1px solid rgba(255,255,255,0.16)",
+    boxShadow: "0 8px 18px rgba(0,0,0,0.35)",
+    marginBottom: 14,
     cursor: "pointer",
   },
 
+
+
   taskCardExpanded: {
-    border: "1px solid rgba(255,255,255,0.18)",
-    background: "rgba(0,0,0,0.28)",
+    border: "1px solid rgba(255,255,255,0.28)",     // ✅ brighter
+    background: "rgba(255,255,255,0.06)",           // ✅ lighter background
+    boxShadow: "0 12px 26px rgba(0,0,0,0.45)",      // ✅ more depth
   },
+
 
   taskTopRow: {
     display: "flex",
