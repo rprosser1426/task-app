@@ -25,9 +25,11 @@ type TaskRow = {
   task_assignments?: AssignmentRow[];
 };
 
-export default function TaskBoard() {
-  console.log("✅ TaskBoard.tsx LOADED (the one Rick edited)");
+type SessionResp =
+  | { ok: true; accessCodeId: string; role?: string }
+  | { ok: false };
 
+export default function TaskBoard() {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [newTitle, setNewTitle] = useState("");
   const [loading, setLoading] = useState(true);
@@ -39,13 +41,31 @@ export default function TaskBoard() {
     [tasks]
   );
 
+  async function getSession(): Promise<SessionResp> {
+    const res = await fetch("/api/auth/session");
+    if (!res.ok) return { ok: false };
+    return (await res.json().catch(() => ({ ok: false }))) as SessionResp;
+  }
+
   const loadTasks = async () => {
     setError(null);
     setLoading(true);
 
+    const session = await getSession();
+    if (!session.ok) {
+      setError("Not signed in. Please log in again.");
+      setTasks([]);
+      setLoading(false);
+      return;
+    }
+
+    // ✅ Treat accessCodeId as the “user” for this code-based auth system
+    const userId = session.accessCodeId;
+
     const { data, error } = await supabase
       .from("tasks")
-      .select(`
+      .select(
+        `
         id,
         user_id,
         title,
@@ -63,7 +83,9 @@ export default function TaskBoard() {
           completion_note,
           created_at
         )
-      `)
+      `
+      )
+      .eq("user_id", userId)
       .order("created_at", { ascending: false });
 
     if (error) setError(error.message);
@@ -74,14 +96,7 @@ export default function TaskBoard() {
 
   useEffect(() => {
     loadTasks();
-
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      loadTasks();
-    });
-
-    return () => {
-      sub.subscription.unsubscribe();
-    };
+    // NOTE: removed supabase.auth.onAuthStateChange — no longer relevant
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -92,25 +107,24 @@ export default function TaskBoard() {
     setError(null);
     setSaving(true);
 
-    const {
-      data: { user },
-      error: userErr,
-    } = await supabase.auth.getUser();
-
-    if (userErr || !user) {
+    const session = await getSession();
+    if (!session.ok) {
       setSaving(false);
       setError("Not signed in. Please log in again.");
       return;
     }
 
+    const userId = session.accessCodeId;
+
     const { data, error } = await supabase
       .from("tasks")
       .insert({
-        user_id: user.id,
+        user_id: userId,
         title,
         is_done: false,
       })
-      .select(`
+      .select(
+        `
         id,
         user_id,
         title,
@@ -128,7 +142,8 @@ export default function TaskBoard() {
           completion_note,
           created_at
         )
-      `)
+      `
+      )
       .single();
 
     if (error) {
@@ -146,9 +161,7 @@ export default function TaskBoard() {
 
     // optimistic UI
     setTasks((prev) =>
-      prev.map((t) =>
-        t.id === task.id ? { ...t, is_done: !t.is_done } : t
-      )
+      prev.map((t) => (t.id === task.id ? { ...t, is_done: !t.is_done } : t))
     );
 
     const { error } = await supabase
@@ -159,9 +172,7 @@ export default function TaskBoard() {
     if (error) {
       // revert if failed
       setTasks((prev) =>
-        prev.map((t) =>
-          t.id === task.id ? { ...t, is_done: task.is_done } : t
-        )
+        prev.map((t) => (t.id === task.id ? { ...t, is_done: task.is_done } : t))
       );
       setError(error.message);
     }
@@ -210,9 +221,7 @@ export default function TaskBoard() {
       </div>
 
       <div style={{ marginTop: 10, fontSize: 14, opacity: 0.8 }}>
-        {loading
-          ? "Loading tasks..."
-          : `${remaining} remaining • ${tasks.length} total`}
+        {loading ? "Loading tasks..." : `${remaining} remaining • ${tasks.length} total`}
       </div>
 
       {error && <div style={{ marginTop: 10, color: "crimson" }}>{error}</div>}
@@ -231,11 +240,7 @@ export default function TaskBoard() {
               marginBottom: 8,
             }}
           >
-            <input
-              type="checkbox"
-              checked={t.is_done}
-              onChange={() => toggleDone(t)}
-            />
+            <input type="checkbox" checked={t.is_done} onChange={() => toggleDone(t)} />
 
             <div style={{ flex: 1 }}>
               <div
@@ -268,9 +273,7 @@ export default function TaskBoard() {
         ))}
 
         {!loading && tasks.length === 0 && (
-          <li style={{ marginTop: 12, opacity: 0.8 }}>
-            No tasks yet. Add one above.
-          </li>
+          <li style={{ marginTop: 12, opacity: 0.8 }}>No tasks yet. Add one above.</li>
         )}
       </ul>
     </section>

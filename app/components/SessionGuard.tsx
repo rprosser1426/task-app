@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
 
 export default function SessionGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -12,26 +11,30 @@ export default function SessionGuard({ children }: { children: React.ReactNode }
     let mounted = true;
 
     const check = async () => {
-      const { data } = await supabase.auth.getSession();
-      if (!mounted) return;
+      try {
+        const res = await fetch("/api/auth/session");
+        if (!mounted) return;
 
-      if (!data.session) {
+        if (!res.ok) {
+          router.replace("/login");
+          return;
+        }
+
+        const data = await res.json().catch(() => ({}));
+        if (!data?.ok) {
+          router.replace("/login");
+          return;
+        }
+
+        setReady(true);
+      } catch {
         router.replace("/login");
-        return;
       }
-
-      setReady(true);
     };
 
     check();
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!session) router.replace("/login");
-    });
-
     return () => {
       mounted = false;
-      sub.subscription.unsubscribe();
     };
   }, [router]);
 

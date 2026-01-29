@@ -1,32 +1,38 @@
 "use client";
 
 import { useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
+import { useRouter } from "next/navigation";
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const router = useRouter();
 
-  async function sendMagicLink() {
+  async function loginWithCode() {
     setMsg(null);
     setLoading(true);
 
     try {
-      const { error } = await supabase.auth.signInWithOtp({
-        email,
-        options: {
-          // sends them back to the app after clicking email link
-          emailRedirectTo: typeof window !== "undefined" ? window.location.origin : undefined,
-        },
+      const normalized = code.trim().toUpperCase();
+
+      const res = await fetch("/api/auth/code-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: normalized }),
       });
 
-      if (error) throw error;
+      const data = await res.json().catch(() => ({}));
 
-      setMsg("✅ Check your email for the magic link.");
-      setEmail("");
+      if (!res.ok) {
+        throw new Error((data as any)?.error || "Invalid access code");
+      }
+
+      // success → session cookie is set server-side
+      router.push("/tasks");
+      router.refresh();
     } catch (e: any) {
-      setMsg(`❌ ${e.message || "Something went wrong sending the link."}`);
+      setMsg(`❌ ${e.message}`);
     } finally {
       setLoading(false);
     }
@@ -39,24 +45,30 @@ export default function LoginPage() {
           <div style={styles.logo} />
           <div>
             <div style={styles.title}>Task App</div>
-            <div style={styles.subtitle}>Sign in to continue</div>
+            <div style={styles.subtitle}>Enter your access code</div>
           </div>
         </div>
 
-        <label style={styles.label}>Email</label>
+        <label style={styles.label}>Access Code</label>
         <input
           style={styles.input}
-          placeholder="you@company.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          placeholder="e.g. RICK-7392"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && code.trim() && !loading) loginWithCode();
+          }}
+          autoCapitalize="characters"
+          autoCorrect="off"
+          spellCheck={false}
         />
 
         <button
-          style={{ ...styles.button, opacity: loading || !email ? 0.6 : 1 }}
-          disabled={loading || !email}
-          onClick={sendMagicLink}
+          style={{ ...styles.button, opacity: loading || !code.trim() ? 0.6 : 1 }}
+          disabled={loading || !code.trim()}
+          onClick={loginWithCode}
         >
-          {loading ? "Sending..." : "Send Magic Link"}
+          {loading ? "Signing in..." : "Access Tasks"}
         </button>
 
         {msg && <div style={styles.message}>{msg}</div>}
@@ -65,7 +77,8 @@ export default function LoginPage() {
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+// Put styles OUTSIDE the component so they're not recreated each render
+const styles: Record<string, any> = {
   page: {
     minHeight: "100vh",
     display: "grid",
