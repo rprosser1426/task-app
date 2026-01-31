@@ -45,10 +45,7 @@ export async function GET() {
     const sess = await getSessionFromCookie();
 
     if (!sess.ok) {
-      return NextResponse.json(
-        { ok: false },
-        { status: 401, headers: { "Cache-Control": "no-store" } }
-      );
+      return NextResponse.json({ ok: false }, { status: 401, headers: { "Cache-Control": "no-store" } });
     }
 
     const role = String(sess.role || "").toLowerCase();
@@ -73,6 +70,8 @@ export async function GET() {
           due_at,
           user_id,
           created_at,
+          category_id,
+          task_category:task_categories ( name ),
           task_assignments (
             id,
             task_id,
@@ -88,10 +87,17 @@ export async function GET() {
 
       if (error) throw error;
 
+      const tasksWithCategory = (tasks ?? []).map((t: any) => {
+        const cat = Array.isArray(t.task_category) ? t.task_category[0] : t.task_category;
+        return { ...t, category_name: cat?.name ?? null };
+      });
+
+
       return NextResponse.json(
-        { ok: true, tasks: tasks ?? [] },
+        { ok: true, tasks: tasksWithCategory },
         { headers: { "Cache-Control": "no-store" } }
       );
+
     }
 
     // ✅ Non-admin: must have a resolved profile id
@@ -113,10 +119,7 @@ export async function GET() {
     const taskIds = Array.from(new Set((myAssignRows ?? []).map((r) => r.task_id))).filter(Boolean);
 
     if (taskIds.length === 0) {
-      return NextResponse.json(
-        { ok: true, tasks: [] },
-        { headers: { "Cache-Control": "no-store" } }
-      );
+      return NextResponse.json({ ok: true, tasks: [] }, { headers: { "Cache-Control": "no-store" } });
     }
 
     // ✅ Step 2: fetch those tasks with ALL assignments (so you can see other users + status)
@@ -132,6 +135,8 @@ export async function GET() {
         due_at,
         user_id,
         created_at,
+        category_id,
+        task_category:task_categories ( name ),
         task_assignments (
           id,
           task_id,
@@ -148,13 +153,250 @@ export async function GET() {
 
     if (tErr) throw tErr;
 
+    const tasksWithCategory = (tasks ?? []).map((t: any) => {
+      const cat = Array.isArray(t.task_category)
+        ? t.task_category[0]
+        : t.task_category;
+
+      return {
+        ...t,
+        category_name: cat?.name ?? null,
+      };
+    });
+
+
+
+
+
     return NextResponse.json(
-      { ok: true, tasks: tasks ?? [] },
+      { ok: true, tasks: tasksWithCategory },
       { headers: { "Cache-Control": "no-store" } }
     );
+
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: e?.message || "Server error" },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+}
+
+export async function POST(req: Request) {
+  try {
+    const sess = await getSessionFromCookie();
+
+    if (!sess.ok) {
+      return NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const body = await req.json().catch(() => ({}));
+
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    const due_at = typeof body.due_at === "string" ? body.due_at : null;
+    const note = body.note === null ? null : typeof body.note === "string" ? body.note.trim() : null;
+    const category_id = typeof body.category_id === "string" && body.category_id.trim() ? body.category_id : null;
+
+
+    const rawAssignees: unknown[] = Array.isArray(body.assignee_ids)
+      ? body.assignee_ids
+      : [];
+
+    const assignee_ids: string[] = Array.from(
+      new Set(
+        rawAssignees
+          .map((x) => String(x ?? "").trim())
+          .filter((s) => s.length > 0)
+      )
+    );
+
+
+    if (!title) {
+      return NextResponse.json(
+        { ok: false, error: "Title cannot be blank" },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    if (!due_at) {
+      return NextResponse.json(
+        { ok: false, error: "Due date cannot be blank" },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const resolvedUserId = await resolveProfileUserId({
+      userId: sess.userId ?? null,
+      accessCodeId: sess.accessCodeId ?? null,
+    });
+
+    if (!resolvedUserId) {
+      return NextResponse.json(
+        { ok: false, error: "No profile userId resolved for this session." },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const { data: createdTask, error: taskErr } = await supabaseAdmin
+      .from("tasks")
+      .insert({
+        title,
+        due_at,
+        note,
+        category_id: category_id ?? null, // ✅ add this
+        user_id: sess.accessCodeId,   // ✅ satisfies tasks_user_id_fkey
+        created_by: sess.accessCodeId // ✅ satisfies tasks_created_by_fkey
+      })
+      .select("id")
+      .maybeSingle();
+
+
+
+    if (taskErr) {
+      return NextResponse.json(
+        { ok: false, error: taskErr.message },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const taskId = createdTask?.id;
+    if (!taskId) {
+      return NextResponse.json(
+        { ok: false, error: "Task created but no id returned." },
+        { status: 500, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    if (assignee_ids.length > 0) {
+      const rows = assignee_ids.map((assignee_id: string) => ({
+        task_id: taskId,
+        assignee_id,
+        status: "open",
+        completed_at: null,
+        completion_note: null,
+      }));
+
+      const { error: aErr } = await supabaseAdmin.from("task_assignments").insert(rows);
+
+      if (aErr) {
+        // best-effort cleanup so you don't get orphan tasks
+        await supabaseAdmin.from("tasks").delete().eq("id", taskId);
+        return NextResponse.json(
+          { ok: false, error: aErr.message },
+          { status: 400, headers: { "Cache-Control": "no-store" } }
+        );
+      }
+    }
+
+    return NextResponse.json({ ok: true, id: taskId }, { headers: { "Cache-Control": "no-store" } });
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: e?.message || "POST /api/tasks failed" },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+}
+
+export async function DELETE(req: Request) {
+  try {
+    const sess = await getSessionFromCookie();
+
+    if (!sess.ok) {
+      return NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const { searchParams } = new URL(req.url);
+    const id = searchParams.get("id") || "";
+
+    if (!id) {
+      return NextResponse.json(
+        { ok: false, error: "Missing id" },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    // delete assignments first (safe even if you have cascade)
+    const { error: aErr } = await supabaseAdmin.from("task_assignments").delete().eq("task_id", id);
+    if (aErr) {
+      return NextResponse.json(
+        { ok: false, error: aErr.message },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const { error: tErr } = await supabaseAdmin.from("tasks").delete().eq("id", id);
+    if (tErr) {
+      return NextResponse.json(
+        { ok: false, error: tErr.message },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    return NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: e?.message || "DELETE /api/tasks failed" },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+}
+
+export async function PATCH(req: Request) {
+  try {
+    const sess = await getSessionFromCookie();
+
+    if (!sess.ok) {
+      return NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const body = await req.json().catch(() => ({}));
+
+    const taskId = String(body.taskId || "");
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    const due_at = typeof body.due_at === "string" ? body.due_at : null;
+    const note = body.note === null ? null : typeof body.note === "string" ? body.note.trim() : null;
+
+    if (!taskId) {
+      return NextResponse.json({ ok: false, error: "Missing taskId" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+    }
+    if (!title) {
+      return NextResponse.json(
+        { ok: false, error: "Title cannot be blank" },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+    if (!due_at) {
+      return NextResponse.json(
+        { ok: false, error: "Due date cannot be blank" },
+        { status: 400, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    const { error } = await supabaseAdmin
+      .from("tasks")
+      .update({
+        title,
+        due_at,
+        note,
+      })
+      .eq("id", taskId);
+
+    if (error) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 400, headers: { "Cache-Control": "no-store" } });
+    }
+
+    return NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: e?.message || "PATCH /api/tasks failed" },
       { status: 500, headers: { "Cache-Control": "no-store" } }
     );
   }
