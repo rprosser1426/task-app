@@ -52,7 +52,7 @@ export default function LoginPage() {
         <label style={styles.label}>Access Code</label>
         <input
           style={styles.input}
-          placeholder="e.g. RICK-7392"
+          placeholder="password"
           value={code}
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => {

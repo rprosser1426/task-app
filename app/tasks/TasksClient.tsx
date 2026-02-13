@@ -178,6 +178,22 @@ function matchesCategory(t: TaskRow, categoryId: string) {
   return (t.category_id ?? null) === categoryId;
 }
 
+function matchesSearch(t: TaskRow, q: string) {
+  const needle = q.trim().toLowerCase();
+  if (!needle) return true;
+
+  const hay = [
+    t.title ?? "",
+    t.note ?? "",
+    (t as any).category_name ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return hay.includes(needle);
+}
+
+
 
 export default function TasksClient() {
   console.log("TasksClient rendered ✅");
@@ -255,6 +271,8 @@ export default function TasksClient() {
 
   const [dueFilter, setDueFilter] = useState<DueFilter>("__all__");
   const [categoryFilter, setCategoryFilter] = useState<string>("__all__");
+  const [searchText, setSearchText] = useState<string>("");
+
 
 
 
@@ -316,6 +334,7 @@ export default function TasksClient() {
       // ✅ Category filter (user screen)
       if (categoryFilter !== "__all__" && t.category_id !== categoryFilter) return false;
 
+      if (!matchesSearch(t, searchText)) return false;
 
       // ✅ Category filter
       if (categoryFilter !== "__all__" && t.category_id !== categoryFilter) {
@@ -340,7 +359,7 @@ export default function TasksClient() {
 
       return mine.status !== "complete";
     });
-  }, [tasks, userId, accessCodeId, expandedTaskId, dueFilter, categoryFilter]);
+  }, [tasks, userId, accessCodeId, expandedTaskId, dueFilter, categoryFilter, searchText]);
 
 
 
@@ -373,12 +392,13 @@ export default function TasksClient() {
       // ✅ Category filter (user screen)
       if (categoryFilter !== "__all__" && t.category_id !== categoryFilter) return false;
 
+      if (!matchesSearch(t, searchText)) return false;
 
       const mine = myAssignmentForTask(t);
       if (!mine) return false;
       return mine.status === "complete";
     });
-  }, [tasks, userId, accessCodeId, dueFilter, categoryFilter]);
+  }, [tasks, userId, accessCodeId, dueFilter, categoryFilter, searchText]);
 
 
   const unassignedTasks = useMemo(() => {
@@ -388,6 +408,7 @@ export default function TasksClient() {
 
         if (categoryFilter !== "__all__" && (t as any).category_id !== categoryFilter) return false;
 
+        if (!matchesSearch(t, searchText)) return false;
 
         // ✅ apply the same due filter rules as the user screen
         if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(t.due_at)) return false;
@@ -401,7 +422,7 @@ export default function TasksClient() {
         const bb = b.created_at ? new Date(b.created_at).getTime() : 0;
         return bb - aa;
       });
-  }, [tasks, dueFilter, categoryFilter]);
+  }, [tasks, dueFilter, categoryFilter, searchText]);
 
 
   const tasksByAssignee = useMemo(() => {
@@ -412,6 +433,7 @@ export default function TasksClient() {
       if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(t.due_at)) continue;
       if (!matchesDueFilter(t.due_at, dueFilter)) continue;
       if (categoryFilter !== "__all__" && (t as any).category_id !== categoryFilter) continue;
+      if (!matchesSearch(t, searchText)) continue;
 
 
       if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(t.due_at)) continue;
@@ -436,7 +458,7 @@ export default function TasksClient() {
     }
 
     return map;
-  }, [tasks, dueFilter, categoryFilter]);
+  }, [tasks, dueFilter, categoryFilter,searchText]);
 
 
   async function loadSessionAndTasks() {
@@ -874,14 +896,6 @@ export default function TasksClient() {
 
   function renderTaskCard(t: TaskRow) {
 
-    //#Rick
-    console.log("task category fields:", {
-      id: t.id,
-      category_name: (t as any).category_name,
-      category_id: (t as any).category_id,
-      category: (t as any).category,
-    });
-
 
     const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
     const isSaving = !!savingAssignments[t.id];
@@ -1263,6 +1277,14 @@ export default function TasksClient() {
                 >
                   {showClosed ? "Hide Closed" : "Show Closed"}
                 </button>
+
+                <input
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  placeholder="Search tasks…"
+                  style={{ ...styles.input, maxWidth: 260, minWidth: 220 }}
+                />
+
 
                 <select
                   value={dueFilter}

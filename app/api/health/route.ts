@@ -11,7 +11,7 @@ export async function GET() {
 
     if (!url || !key) {
       return NextResponse.json(
-        { ok: false, error: "Missing Supabase env vars" },
+        { ok: false, error: "Mgitissing Supabase env vars" },
         { status: 500 }
       );
     }

@@ -82,20 +82,24 @@ export async function PATCH(req: Request) {
             const assignmentId = rows[0].id;
 
             // 2) Update by id (guaranteed single row)
-            const { error: upErr } = await supabaseAdmin
+            // 2) Update by id (guaranteed single row) + return what we wrote
+            const { data: updated, error: upErr } = await supabaseAdmin
                 .from("task_assignments")
                 .update({
                     status: nextStatus,
                     completed_at: nextCompletedAt,
                 })
-                .eq("id", assignmentId);
+                .eq("id", assignmentId)
+                .select("id, status, completed_at")
+                .single();
 
             if (upErr) {
                 console.error("task_assignments update error:", upErr);
                 return noStore({ ok: false, error: upErr.message }, 500);
             }
 
-            return noStore({ ok: true });
+            return noStore({ ok: true, updated });
+
         }
 
         // SYNC assignments for a task (set assignees list)
