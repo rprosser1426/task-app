@@ -99,11 +99,12 @@ export async function POST(req: Request) {
     const cookieStore = await cookies();
     cookieStore.set("taskapp_session", sessionToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
+      secure: true,        // required for Teams iframe
+      sameSite: "none",    // required for Teams iframe
       path: "/",
       expires: expiresAt,
     });
+
 
     console.log("CODE LOGIN → success, cookie set");
 
