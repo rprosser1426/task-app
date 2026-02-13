@@ -25,7 +25,7 @@ export async function POST(req: Request) {
     const normalized = raw.trim().toUpperCase();
 
     console.log("CODE LOGIN → supabase url:", SUPABASE_URL);
-    console.log("CODE LOGIN → service key present:", !!SERVICE_KEY);
+    console.log("CODE  → service key present:", !!SERVICE_KEY);
     console.log("CODE LOGIN → raw:", raw);
     console.log("CODE LOGIN → normalized:", normalized);
 
