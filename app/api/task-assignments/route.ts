@@ -100,7 +100,37 @@ export async function PATCH(req: Request) {
 
             return noStore({ ok: true, updated });
 
+
+
         }
+
+        // SET OWNER flag for a single assignee's assignment row
+        if (action === "set_owner") {
+            const taskId = body?.taskId as string | undefined;
+            const assigneeId = body?.assigneeId as string | undefined;
+            const is_owner = body?.is_owner as boolean | undefined;
+
+            if (!taskId || !assigneeId || typeof is_owner !== "boolean") {
+                return noStore({ ok: false, error: "Missing taskId, assigneeId, or is_owner" }, 400);
+            }
+
+            // Update the single row for this task+assignee
+            const { data: updated, error: upErr } = await supabaseAdmin
+                .from("task_assignments")
+                .update({ is_owner })
+                .eq("task_id", taskId)
+                .eq("assignee_id", assigneeId)
+                .select("task_id, assignee_id, is_owner")
+                .single();
+
+            if (upErr) {
+                console.error("task_assignments set_owner update error:", upErr);
+                return noStore({ ok: false, error: upErr.message }, 500);
+            }
+
+            return noStore({ ok: true, updated });
+        }
+
 
         // SYNC assignments for a task (set assignees list)
         if (action === "sync") {

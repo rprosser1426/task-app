@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const SHOW_CLOSED_KEY = "taskapp_showClosed"; // ✅ MUST be here
+const ADMIN_USER_FILTER_KEY = "taskapp_adminUserFilterId";
+
 
 type DueFilter =
   | "__all__"
@@ -29,6 +31,7 @@ type AssignmentRow = {
   completed_at: string | null;
   completion_note: string | null;
   created_at: string;
+  is_owner?: boolean;
 };
 
 type TaskRow = {
@@ -228,11 +231,18 @@ export default function TasksClient() {
   const [newCategoryId, setNewCategoryId] = useState<string>("");
 
   const [newAssigneeIds, setNewAssigneeIds] = useState<string[]>([]);
+  const [newOwnerIds, setNewOwnerIds] = useState<string[]>([]);
+
   const [assignOpen, setAssignOpen] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
 
   const [adding, setAdding] = useState(false);
   const addLockRef = useRef(false);
+  const didInitAdminFilterRef = useRef(false);
+  const assignWrapRef = useRef<HTMLDivElement | null>(null);
+
+
+
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -267,9 +277,34 @@ export default function TasksClient() {
   const [addOpen, setAddOpen] = useState(false);
 
 
-  const [adminUserFilterId, setAdminUserFilterId] = useState<string>("__all__");
+  const [adminUserFilterId, setAdminUserFilterId] = useState<string>(() => {
+    if (typeof window === "undefined") return "__all__";
+    return window.localStorage.getItem(ADMIN_USER_FILTER_KEY) || "__all__";
+  });
 
-  const [dueFilter, setDueFilter] = useState<DueFilter>("__all__");
+
+
+  const [dueFilter, setDueFilter] = useState<DueFilter>("today");
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (!signedInId) return;
+    if (didInitAdminFilterRef.current) return;
+
+    // Only auto-default if there is NO saved preference yet
+    const saved =
+      typeof window === "undefined"
+        ? null
+        : window.localStorage.getItem("taskapp_adminUserFilterId");
+
+    if (!saved) {
+      setAdminUserFilterId(signedInId);
+    }
+
+    didInitAdminFilterRef.current = true;
+  }, [isAdmin, signedInId]);
+
+
   const [categoryFilter, setCategoryFilter] = useState<string>("__all__");
   const [searchText, setSearchText] = useState<string>("");
 
@@ -324,6 +359,31 @@ export default function TasksClient() {
   function isAssignmentDoneForAssignee(task: TaskRow, assigneeId: string | null) {
     return assignmentForAssignee(task, assigneeId)?.status === "complete";
   }
+
+  function isOwner(task: TaskRow, assigneeId: string) {
+    return assignmentForTask(task, assigneeId)?.is_owner === true;
+  }
+
+  async function setOwnerForUser(taskId: string, assigneeId: string, is_owner: boolean) {
+    setErrorMsg(null);
+    try {
+      const res = await fetch("/api/task-assignments", {
+        method: "PATCH",
+        credentials: "include",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ action: "set_owner", taskId, assigneeId, is_owner }),
+      });
+
+      const j = await res.json().catch(() => ({ ok: false }));
+      if (!res.ok || !j?.ok) throw new Error(j?.error || "Failed to set owner");
+
+      await loadSessionAndTasks();
+    } catch (e: any) {
+      setErrorMsg(e?.message || "Failed to set owner.");
+    }
+  }
+
 
   const openTasks = useMemo(() => {
     if (!userId && !accessCodeId) return [];
@@ -458,7 +518,7 @@ export default function TasksClient() {
     }
 
     return map;
-  }, [tasks, dueFilter, categoryFilter,searchText]);
+  }, [tasks, dueFilter, categoryFilter, searchText]);
 
 
   async function loadSessionAndTasks() {
@@ -565,10 +625,17 @@ export default function TasksClient() {
     }
   }
 
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(SHOW_CLOSED_KEY, String(showClosed));
   }, [showClosed]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("taskapp_adminUserFilterId", adminUserFilterId);
+  }, [adminUserFilterId]);
+
 
   useEffect(() => {
     loadSessionAndTasks();
@@ -606,6 +673,7 @@ export default function TasksClient() {
           due_at,
           note,
           assignee_ids: Array.from(new Set(newAssigneeIds)),
+          owner_ids: Array.from(new Set(newOwnerIds)),
           category_id: newCategoryId || null,
         }),
       });
@@ -873,13 +941,16 @@ export default function TasksClient() {
   useEffect(() => {
     if (!assignOpen) return;
 
-    function onDocClick() {
-      setAssignOpen(false);
+    function onDocClick(e: MouseEvent) {
+      const el = assignWrapRef.current;
+      if (el && el.contains(e.target as Node)) return; // ✅ clicks inside stay open
+      setAssignOpen(false); // ✅ outside click closes
     }
 
     document.addEventListener("click", onDocClick);
     return () => document.removeEventListener("click", onDocClick);
   }, [assignOpen]);
+
 
 
   // NOTE dropdown should stay open until the user clicks "Done"
@@ -1002,19 +1073,24 @@ export default function TasksClient() {
             ) : (
               assignees.map((uid) => {
                 const done = isAssignmentDone(t, uid);
+                const owner = isOwner(t, uid); // ✅ uses your helper (assignment.is_owner)
+
                 return (
                   <span
                     key={uid}
                     style={{
                       ...styles.assigneePill,
                       ...(done ? styles.assigneePillDone : styles.assigneePillOpen),
+                      ...(owner ? styles.assigneePillOwner : null),
                     }}
-                    title={done ? "Done" : "Open"}
+                    title={`${done ? "Done" : "Open"}${owner ? " • Owner" : ""}`}
                   >
                     {displayUserName(uid)}
+                    {owner ? " ★" : ""}
                   </span>
                 );
               })
+
             )}
           </div>
         ) : null}
@@ -1119,6 +1195,29 @@ export default function TasksClient() {
                             />
 
                             <span style={{ marginLeft: 10, flex: 1 }}>{label}</span>
+
+                            {checked && (
+                              <button
+                                type="button"
+                                style={{
+                                  ...styles.smallBtn,
+                                  padding: "6px 10px",
+                                  opacity: isOwner(t, u.id) ? 1 : 0.6,
+                                  borderColor: isOwner(t, u.id)
+                                    ? "rgba(34,197,94,0.55)"
+                                    : "rgba(255,255,255,0.18)",
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void setOwnerForUser(t.id, u.id, !isOwner(t, u.id));
+                                }}
+                                title="Toggle owner"
+                              >
+                                Owner
+                              </button>
+                            )}
+
+
 
                             {!isAdmin && (
                               <span
@@ -1438,7 +1537,8 @@ export default function TasksClient() {
                   title="Due date (optional — if blank, defaults to now)"
                 />
 
-                <div style={{ position: "relative", width: 260 }}>
+                <div ref={assignWrapRef} style={{ position: "relative", width: 260 }}>
+
                   <button
                     type="button"
                     style={styles.selectBtn}
@@ -1467,6 +1567,7 @@ export default function TasksClient() {
                         assignableUsers.map((u) => {
                           const checked = newAssigneeIds.includes(u.id);
                           const label = labelForUser(u);
+                          const isOwnerChecked = newOwnerIds.includes(u.id);
 
                           return (
                             <label key={u.id} style={styles.checkboxRow}>
@@ -1474,16 +1575,52 @@ export default function TasksClient() {
                                 type="checkbox"
                                 checked={checked}
                                 onChange={(e) => {
-                                  const next = e.currentTarget.checked
+                                  const nextChecked = e.currentTarget.checked;
+
+                                  const nextAssignees = nextChecked
                                     ? Array.from(new Set([...newAssigneeIds, u.id]))
                                     : newAssigneeIds.filter((id) => id !== u.id);
-                                  setNewAssigneeIds(next);
+
+                                  setNewAssigneeIds(nextAssignees);
+
+                                  // ✅ if unassigned, also remove owner flag
+                                  if (!nextChecked) {
+                                    setNewOwnerIds((prev) => prev.filter((id) => id !== u.id));
+                                  } else {
+                                    // ✅ nice UX: if no owner picked yet, first assignee becomes owner automatically
+                                    setNewOwnerIds((prev) => (prev.length ? prev : [u.id]));
+                                  }
                                 }}
                               />
-                              <span style={{ marginLeft: 10 }}>{label}</span>
+
+                              <span style={{ marginLeft: 10, flex: 1 }}>{label}</span>
+
+                              {checked && (
+                                <button
+                                  type="button"
+                                  style={{
+                                    ...styles.smallBtn,
+                                    padding: "6px 10px",
+                                    opacity: isOwnerChecked ? 1 : 0.6,
+                                    borderColor: isOwnerChecked
+                                      ? "rgba(34,197,94,0.55)"
+                                      : "rgba(255,255,255,0.18)",
+                                  }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setNewOwnerIds((prev) =>
+                                      prev.includes(u.id) ? prev.filter((id) => id !== u.id) : [...prev, u.id]
+                                    );
+                                  }}
+                                  title="Toggle owner"
+                                >
+                                  Owner
+                                </button>
+                              )}
                             </label>
                           );
                         })
+
                       )}
 
                       <div style={{ fontSize: 12, opacity: 0.8, marginTop: 6 }}>
@@ -1917,6 +2054,12 @@ const styles: Record<string, React.CSSProperties> = {
     borderStyle: "solid",
     borderColor: "rgba(239,68,68,0.65)",
   },
+
+  assigneePillOwner: {
+    borderColor: "rgba(34,197,94,0.75)",
+    boxShadow: "0 0 0 1px rgba(34,197,94,0.25) inset",
+  },
+
 
 
   assigneePillDone: {

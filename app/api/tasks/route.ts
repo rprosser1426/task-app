@@ -73,14 +73,16 @@ export async function GET() {
           category_id,
           task_category:task_categories ( name ),
           task_assignments (
-            id,
-            task_id,
-            assignee_id,
-            status,
-            completed_at,
-            completion_note,
-            created_at
-          )
+          id,
+          task_id,
+          assignee_id,
+          status,
+          completed_at,
+          completion_note,
+          created_at,
+          is_owner
+        )
+
         `
         )
         .order("created_at", { ascending: false });
@@ -144,7 +146,8 @@ export async function GET() {
           status,
           completed_at,
           completion_note,
-          created_at
+          created_at,
+          is_owner
         )
       `
       )
@@ -212,6 +215,26 @@ export async function POST(req: Request) {
       )
     );
 
+    // ✅ NEW: owner_ids from client (optional). If none provided, default owner = first assignee.
+    // Single owner preferred.
+    const rawOwners: unknown[] = Array.isArray(body.owner_ids) ? body.owner_ids : [];
+
+    const owner_ids: string[] = Array.from(
+      new Set(
+        rawOwners
+          .map((x) => String(x ?? "").trim())
+          .filter((s) => s.length > 0)
+      )
+    );
+
+    // Choose ONE owner:
+    // 1) first owner_id that is also in assignee_ids
+    // 2) otherwise first assignee
+    const owner_id: string | null =
+      (owner_ids.find((id) => assignee_ids.includes(id)) ?? null) ||
+      (assignee_ids[0] ?? null);
+
+
 
     if (!title) {
       return NextResponse.json(
@@ -270,13 +293,19 @@ export async function POST(req: Request) {
     }
 
     if (assignee_ids.length > 0) {
+      // ✅ Always pick an owner when at least 1 assignee exists
+      const final_owner_id = owner_id ?? assignee_ids[0];
+
       const rows = assignee_ids.map((assignee_id: string) => ({
         task_id: taskId,
         assignee_id,
         status: "open",
         completed_at: null,
         completion_note: null,
+        is_owner: assignee_id === final_owner_id,
       }));
+
+
 
       const { error: aErr } = await supabaseAdmin.from("task_assignments").insert(rows);
 
