@@ -80,7 +80,8 @@ export async function GET() {
           completed_at,
           completion_note,
           created_at,
-          is_owner
+          is_owner,
+          snooze_until
         )
 
         `
@@ -147,7 +148,8 @@ export async function GET() {
           completed_at,
           completion_note,
           created_at,
-          is_owner
+          is_owner,
+          snooze_until
         )
       `
       )
@@ -303,7 +305,9 @@ export async function POST(req: Request) {
         completed_at: null,
         completion_note: null,
         is_owner: assignee_id === final_owner_id,
+        snooze_until: null,
       }));
+
 
 
 

@@ -100,10 +100,7 @@ export async function PATCH(req: Request) {
 
             return noStore({ ok: true, updated });
 
-
-
         }
-
         // SET OWNER flag for a single assignee's assignment row
         if (action === "set_owner") {
             const taskId = body?.taskId as string | undefined;
@@ -131,6 +128,35 @@ export async function PATCH(req: Request) {
             return noStore({ ok: true, updated });
         }
 
+        // SET SNOOZE date for a single assignee's assignment row
+        if (action === "set_snooze") {
+            const taskId = body?.taskId as string | undefined;
+            const assigneeId = body?.assigneeId as string | undefined;
+
+            const snooze_until =
+                body?.snooze_until === null || body?.snooze_until === ""
+                    ? null
+                    : (body?.snooze_until as string | undefined);
+
+            if (!taskId || !assigneeId) {
+                return noStore({ ok: false, error: "Missing taskId or assigneeId" }, 400);
+            }
+
+            const { data: updated, error: upErr } = await supabaseAdmin
+                .from("task_assignments")
+                .update({ snooze_until })
+                .eq("task_id", taskId)
+                .eq("assignee_id", assigneeId)
+                .select("task_id, assignee_id, snooze_until")
+                .single();
+
+            if (upErr) {
+                console.error("task_assignments set_snooze update error:", upErr);
+                return noStore({ ok: false, error: upErr.message }, 500);
+            }
+
+            return noStore({ ok: true, updated });
+        }
 
         // SYNC assignments for a task (set assignees list)
         if (action === "sync") {
@@ -168,6 +194,7 @@ export async function PATCH(req: Request) {
                     assignee_id,
                     status: "open",
                     completed_at: null,
+                    snooze_until: null,
                 }));
 
                 const { error: upErr } = await supabaseAdmin
@@ -179,6 +206,7 @@ export async function PATCH(req: Request) {
 
             return noStore({ ok: true });
         }
+
 
         return noStore({ ok: false, error: `Unknown action: ${action}` }, 400);
     } catch (e: any) {

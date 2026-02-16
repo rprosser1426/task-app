@@ -36,7 +36,9 @@ type AssignmentRow = {
   completion_note: string | null;
   created_at: string;
   is_owner?: boolean;
+  snooze_until?: string | null; // ✅ NEW
 };
+
 
 type TaskRow = {
   id: string;
@@ -353,6 +355,23 @@ export default function TasksClient() {
     return task.task_assignments?.find((a) => a.assignee_id === assigneeId) ?? null;
   }
 
+  function effectiveDueForAssignee(task: TaskRow, assigneeId: string | null) {
+    if (!assigneeId) return task.due_at ?? null;
+    const a = assignmentForTask(task, assigneeId);
+    return a?.snooze_until ?? task.due_at ?? null;
+  }
+
+
+  function isSnoozedForAssignee(task: TaskRow, assigneeId: string | null) {
+    const due = effectiveDueForAssignee(task, assigneeId);
+    if (!due) return false;
+
+    const d = new Date(due);
+    const now = new Date();
+    return d.getTime() > now.getTime();
+  }
+
+
   function isAssignmentDone(task: TaskRow, assigneeId: string) {
     return assignmentForTask(task, assigneeId)?.status === "complete";
   }
@@ -401,6 +420,27 @@ export default function TasksClient() {
     }
   }
 
+  async function setSnoozeForUser(taskId: string, assigneeId: string, snooze_until: string | null) {
+    setErrorMsg(null);
+    try {
+      const res = await fetch("/api/task-assignments", {
+        method: "PATCH",
+        credentials: "include",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ action: "set_snooze", taskId, assigneeId, snooze_until }),
+      });
+
+      const j = await res.json().catch(() => ({ ok: false }));
+      if (!res.ok || !j?.ok) throw new Error(j?.error || "Failed to set snooze");
+
+      await loadSessionAndTasks();
+    } catch (e: any) {
+      setErrorMsg(e?.message || "Failed to set snooze.");
+    }
+  }
+
+
 
   const openTasks = useMemo(() => {
     if (!userId && !accessCodeId) return [];
@@ -421,14 +461,19 @@ export default function TasksClient() {
 
       // ✅ Only hide future-dated tasks when a specific due filter is selected.
       // If "All (visible)" is selected, show everything (including future).
-      if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(t.due_at)) return false;
+      const myId = userId || accessCodeId || null;
+      const myEffectiveDue = effectiveDueForAssignee(t, myId);
+
+      if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(myEffectiveDue)) return false;
+
 
       if (dueFilter === "today") {
         console.log("DUE DEBUG", t.id, t.title, t.due_at, "bucket=", dueBucket(t.due_at));
       }
 
 
-      if (!matchesDueFilter(t.due_at, dueFilter)) return false;
+      if (!matchesDueFilter(myEffectiveDue, dueFilter)) return false;
+
 
 
       const mine = myAssignmentForTask(t);
@@ -464,8 +509,12 @@ export default function TasksClient() {
   const closedTasks = useMemo(() => {
     if (!userId && !accessCodeId) return [];
     return tasks.filter((t) => {
-      if (!isDueVisible(t.due_at)) return false;
-      if (!matchesDueFilter(t.due_at, dueFilter)) return false;
+      const myId = userId || accessCodeId || null;
+      const myEffectiveDue = effectiveDueForAssignee(t, myId);
+
+      if (!isDueVisible(myEffectiveDue)) return false;
+      if (!matchesDueFilter(myEffectiveDue, dueFilter)) return false;
+
       // ✅ Category filter (user screen)
       if (categoryFilter !== "__all__" && t.category_id !== categoryFilter) return false;
 
@@ -507,22 +556,26 @@ export default function TasksClient() {
 
     for (const t of tasks) {
       // ✅ apply the same due filter rules as the user screen
-      if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(t.due_at)) continue;
-      if (!matchesDueFilter(t.due_at, dueFilter)) continue;
+      // We apply due/snooze per-user, so compute per uid below.
+      // (Don't filter here using t.due_at)
+
       if (categoryFilter !== "__all__" && (t as any).category_id !== categoryFilter) continue;
       if (!matchesSearch(t, searchText)) continue;
-
-
-      if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(t.due_at)) continue;
 
 
       const assigneeIds = (t.task_assignments ?? []).map((a) => a.assignee_id);
       if (assigneeIds.length === 0) continue;
 
       for (const uid of assigneeIds) {
+        const eff = effectiveDueForAssignee(t, uid);
+
+        if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(eff)) continue;
+        if (!matchesDueFilter(eff, dueFilter)) continue;
+
         if (!map.has(uid)) map.set(uid, []);
         map.get(uid)!.push(t);
       }
+
     }
 
     for (const [k, arr] of map.entries()) {
@@ -998,6 +1051,9 @@ export default function TasksClient() {
 
     const targetAssigneeId = targetAssigneeIdForTaskActions();
     const targetA = assignmentForAssignee(t, targetAssigneeId);
+    const snoozeISO = targetA?.snooze_until ?? null;
+    const snoozeDateValue = snoozeISO ? toDateInputFromISO(snoozeISO) : "";
+
     const canComplete = !!targetAssigneeId && !!targetA;
     const isDoneForTarget = isAssignmentDoneForAssignee(t, targetAssigneeId);
 
@@ -1138,6 +1194,42 @@ export default function TasksClient() {
                   style={styles.textarea}
                 />
 
+                {/* Snooze (per-user) */}
+                {targetAssigneeId && targetA ? (
+                  <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <div style={{ fontSize: 12, opacity: 0.85, fontWeight: 700 }}>Snooze until</div>
+
+                    <input
+                      type="date"
+                      value={snoozeDateValue}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        const next = v ? toISOFromDateInput(v) : null;
+                        void setSnoozeForUser(t.id, targetAssigneeId, next);
+                      }}
+                      style={{ ...styles.dateInput, width: 170 }}
+                      title="Hide this task for you until this date"
+                    />
+
+                    <button
+                      type="button"
+                      style={{ ...styles.smallBtn, opacity: snoozeISO ? 1 : 0.55 }}
+                      disabled={!snoozeISO}
+                      onClick={() => void setSnoozeForUser(t.id, targetAssigneeId, null)}
+                      title="Clear snooze"
+                    >
+                      Clear
+                    </button>
+
+                    {snoozeISO ? (
+                      <span style={{ fontSize: 12, opacity: 0.8 }}>
+                        (Hidden until <b>{formatDue(snoozeISO)}</b>)
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
+
+
                 <div style={styles.taskActions}>
                   <button
                     style={styles.smallBtn}
@@ -1176,6 +1268,14 @@ export default function TasksClient() {
                     <b>{t.note}</b>
                   </div>
                 ) : null}
+
+                {/* Snooze (per-user) */}
+                {targetAssigneeId && targetA ? (
+                  <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    ...
+                  </div>
+                ) : null}
+
 
                 {/* Assignment editor */}
                 <div style={{ marginTop: 10 }}>
