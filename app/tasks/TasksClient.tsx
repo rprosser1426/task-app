@@ -5,6 +5,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const SHOW_CLOSED_KEY = "taskapp_showClosed"; // ✅ MUST be here
 const ADMIN_USER_FILTER_KEY = "taskapp_adminUserFilterId";
+const ADMIN_SHOW_OWNED_ONLY_KEY = "taskapp_adminShowOwnedOnly";
+const USER_SHOW_OWNED_ONLY_KEY = "taskapp_userShowOwnedOnly";
+
+
 
 
 type DueFilter =
@@ -281,6 +285,19 @@ export default function TasksClient() {
     if (typeof window === "undefined") return "__all__";
     return window.localStorage.getItem(ADMIN_USER_FILTER_KEY) || "__all__";
   });
+
+  const [adminShowOwnedOnly, setAdminShowOwnedOnly] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(ADMIN_SHOW_OWNED_ONLY_KEY) === "true";
+  });
+
+  const [userShowOwnedOnly, setUserShowOwnedOnly] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(USER_SHOW_OWNED_ONLY_KEY) === "true";
+  });
+
+
+
 
 
 
@@ -635,6 +652,12 @@ export default function TasksClient() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem("taskapp_adminUserFilterId", adminUserFilterId);
   }, [adminUserFilterId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(USER_SHOW_OWNED_ONLY_KEY, String(userShowOwnedOnly));
+  }, [userShowOwnedOnly]);
+
 
 
   useEffect(() => {
@@ -1377,6 +1400,22 @@ export default function TasksClient() {
                   {showClosed ? "Hide Closed" : "Show Closed"}
                 </button>
 
+                {!isAdmin && (
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.smallBtn,
+                      opacity: userShowOwnedOnly ? 1 : 0.75,
+                      borderColor: userShowOwnedOnly ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.18)",
+                    }}
+                    onClick={() => setUserShowOwnedOnly((v) => !v)}
+                    title="Show only tasks where I'm the owner"
+                  >
+                    {userShowOwnedOnly ? "Showing: Owned Only" : "Show only tasks I own"}
+                  </button>
+                )}
+
+
                 <input
                   value={searchText}
                   onChange={(e) => setSearchText(e.target.value)}
@@ -1653,26 +1692,48 @@ export default function TasksClient() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
               <div style={styles.colTitle}>Team</div>
 
-              <select
-                value={adminUserFilterId}
-                onChange={(e) => {
-                  const next = e.target.value;
-                  setAdminUserFilterId(next);
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                {/* ✅ Only show when "me" is selected */}
+                {adminUserFilterId === signedInId && signedInId ? (
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.smallBtn,
+                      opacity: adminShowOwnedOnly ? 1 : 0.75,
+                      borderColor: adminShowOwnedOnly ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.18)",
+                    }}
+                    onClick={() => setAdminShowOwnedOnly((v) => !v)}
+                    title="Show only tasks where I'm the owner"
+                  >
+                    {adminShowOwnedOnly ? "Showing: Owned Only" : "Show only tasks I own"}
+                  </button>
+                ) : null}
 
-                  setExpandedUserId(null);
-                  setActingAssigneeId(null);
-                  setExpandedTaskId(null);
-                }}
-                style={styles.selectNative}
-                title="Filter to one team member"
-              >
-                {adminFilterOptions.map((opt) => (
-                  <option key={opt.id} value={opt.id} style={styles.selectOption}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+                <select
+                  value={adminUserFilterId}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setAdminUserFilterId(next);
+
+                    // Optional: reset owned-only when switching away from me
+                    if (next !== signedInId) setAdminShowOwnedOnly(false);
+
+                    setExpandedUserId(null);
+                    setActingAssigneeId(null);
+                    setExpandedTaskId(null);
+                  }}
+                  style={styles.selectNative}
+                  title="Filter to one team member"
+                >
+                  {adminFilterOptions.map((opt) => (
+                    <option key={opt.id} value={opt.id} style={styles.selectOption}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
+
 
             {users.length === 0 ? (
               <div style={styles.empty}>No users found.</div>
@@ -1717,7 +1778,14 @@ export default function TasksClient() {
                   .filter((u) => adminUserFilterId === "__all__" || adminUserFilterId === u.id)
                   .map((u) => {
                     const uid = u.id;
-                    const userTasks = tasksByAssignee.get(uid) ?? [];
+                    const allUserTasks = tasksByAssignee.get(uid) ?? [];
+
+                    // ✅ If "me" is selected AND toggle is on, show only tasks where I'm the owner
+                    const userTasks =
+                      adminUserFilterId === signedInId && uid === signedInId && adminShowOwnedOnly
+                        ? allUserTasks.filter((t) => isOwner(t, uid))
+                        : allUserTasks;
+
                     const openCount = openCountForUser(uid, userTasks);
                     const doneCount = closedCountForUser(uid, userTasks);
                     const isUserExpanded = expandedUserId === uid;
