@@ -81,7 +81,7 @@ export async function GET() {
           completion_note,
           created_at,
           is_owner,
-          snooze_until
+          due_at
         )
 
         `
@@ -149,7 +149,7 @@ export async function GET() {
           completion_note,
           created_at,
           is_owner,
-          snooze_until
+          due_at
         )
       `
       )
@@ -305,7 +305,7 @@ export async function POST(req: Request) {
         completed_at: null,
         completion_note: null,
         is_owner: assignee_id === final_owner_id,
-        snooze_until: null,
+        due_at: null,
       }));
 
 
@@ -406,21 +406,18 @@ export async function PATCH(req: Request) {
         { status: 400, headers: { "Cache-Control": "no-store" } }
       );
     }
-    if (!due_at) {
-      return NextResponse.json(
-        { ok: false, error: "Due date cannot be blank" },
-        { status: 400, headers: { "Cache-Control": "no-store" } }
-      );
-    }
+
+    const updatePayload: any = { title, note };
+
+    // only update global due date if explicitly sent
+    if (due_at) updatePayload.due_at = due_at;
 
     const { error } = await supabaseAdmin
       .from("tasks")
-      .update({
-        title,
-        due_at,
-        note,
-      })
+      .update(updatePayload)
       .eq("id", taskId);
+
+
 
     if (error) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 400, headers: { "Cache-Control": "no-store" } });

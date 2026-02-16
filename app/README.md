@@ -34,11 +34,53 @@
 
 
 ## Website
-http://localhost:3000/login
+
 
 
 ## Github (Type each one at a time be sure to add the git add .)
 
+pwd           (Confirm you are in the correct project folder)
+ls
+-----------------------------------------------------------------
+git remote -v  (Verify the GitHub repo this project is connected to)
+
+--------------------------------------------------------------------------------
+
+git status  (Check what files changed)
+
+Review the list carefully.
+
+✅ OK: only files you intended to change
+
+⚠️ STOP: if you see unrelated files
+
+--------------------------------------------------------------------------------
+                        Stage only the specific files you want
+
+                      Do NOT use git add . unless you are sure.
+
+  git add app/api/health/route.ts
+
+--------------------------------------------------------------------------------
+Make sure only intended files are under:
+
+git status
+
+-----------------------------------------------------------------------------------
+Commit
+
+git commit -m "Short clear message of what changed"
+
+--------------------------------------------------------------------------------
+Confirm branch
+
+git branch
+
+-------------------------------------------------------------------------------
+
+Push
+git push origin main
+--------------------------------------------------------------------------------
 git add .    
 git commit -m "Short description of what I changed"
 git push
@@ -55,3 +97,5 @@ Total Monthly Cost	—	$0/mo
 Click anywhere inside the file, then press:
 
 Shift + Alt + F
+
+https://task-app-phi-amber.vercel.app/api/health

@@ -36,7 +36,7 @@ type AssignmentRow = {
   completion_note: string | null;
   created_at: string;
   is_owner?: boolean;
-  snooze_until?: string | null; // ✅ NEW
+  due_at?: string | null; // ✅ NEW
 };
 
 
@@ -329,7 +329,6 @@ export default function TasksClient() {
 
 
 
-
   function toggleExpandedUser(uid: string) {
     setExpandedUserId((prev) => {
       const next = prev === uid ? null : uid;
@@ -358,19 +357,8 @@ export default function TasksClient() {
   function effectiveDueForAssignee(task: TaskRow, assigneeId: string | null) {
     if (!assigneeId) return task.due_at ?? null;
     const a = assignmentForTask(task, assigneeId);
-    return a?.snooze_until ?? task.due_at ?? null;
+    return a?.due_at ?? task.due_at ?? null;
   }
-
-
-  function isSnoozedForAssignee(task: TaskRow, assigneeId: string | null) {
-    const due = effectiveDueForAssignee(task, assigneeId);
-    if (!due) return false;
-
-    const d = new Date(due);
-    const now = new Date();
-    return d.getTime() > now.getTime();
-  }
-
 
   function isAssignmentDone(task: TaskRow, assigneeId: string) {
     return assignmentForTask(task, assigneeId)?.status === "complete";
@@ -417,26 +405,6 @@ export default function TasksClient() {
       await loadSessionAndTasks();
     } catch (e: any) {
       setErrorMsg(e?.message || "Failed to set owner.");
-    }
-  }
-
-  async function setSnoozeForUser(taskId: string, assigneeId: string, snooze_until: string | null) {
-    setErrorMsg(null);
-    try {
-      const res = await fetch("/api/task-assignments", {
-        method: "PATCH",
-        credentials: "include",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ action: "set_snooze", taskId, assigneeId, snooze_until }),
-      });
-
-      const j = await res.json().catch(() => ({ ok: false }));
-      if (!res.ok || !j?.ok) throw new Error(j?.error || "Failed to set snooze");
-
-      await loadSessionAndTasks();
-    } catch (e: any) {
-      setErrorMsg(e?.message || "Failed to set snooze.");
     }
   }
 
@@ -514,9 +482,6 @@ export default function TasksClient() {
 
       if (!isDueVisible(myEffectiveDue)) return false;
       if (!matchesDueFilter(myEffectiveDue, dueFilter)) return false;
-
-      // ✅ Category filter (user screen)
-      if (categoryFilter !== "__all__" && t.category_id !== categoryFilter) return false;
 
       if (!matchesSearch(t, searchText)) return false;
 
@@ -826,10 +791,14 @@ export default function TasksClient() {
   function startEdit(t: TaskRow) {
     setEditTaskId(t.id);
     setEditTitle(t.title);
-    setEditDueDate(t.due_at ? toDateInputFromISO(t.due_at) : "");
+    const assigneeId = targetAssigneeIdForTaskActions();
+    const effDue = effectiveDueForAssignee(t, assigneeId);
+    setEditDueDate(effDue ? toDateInputFromISO(effDue) : "");
+
     setEditNote(t.note ?? "");
     setExpandedTaskId(t.id);
   }
+
 
   function cancelEdit() {
     setEditTaskId(null);
@@ -847,10 +816,6 @@ export default function TasksClient() {
       return;
     }
 
-    if (!editDueDate) {
-      setErrorMsg("Due date cannot be blank (your database requires it).");
-      return;
-    }
 
     try {
       const due_at = toISOFromDateInput(editDueDate);
@@ -861,7 +826,7 @@ export default function TasksClient() {
         credentials: "include",
         cache: "no-store",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ taskId, title, due_at, note }),
+        body: JSON.stringify({ taskId, title, note }),
       });
 
       const raw = await res.text();
@@ -879,6 +844,23 @@ export default function TasksClient() {
         const msg = (j && (j.error || j.message)) || raw || "Failed saving edit.";
         throw new Error(msg);
       }
+
+      // ✅ Save due date for THIS assignee only (not global task)
+      const assigneeId = targetAssigneeIdForTaskActions();
+      if (assigneeId && editDueDate) {
+        await fetch("/api/task-assignments", {
+          method: "PATCH",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "set_due_at",
+            taskId,
+            assigneeId,
+            due_at: toISOFromDateInput(editDueDate),
+          }),
+        });
+      }
+
 
       await loadSessionAndTasks();
       cancelEdit();
@@ -1051,8 +1033,7 @@ export default function TasksClient() {
 
     const targetAssigneeId = targetAssigneeIdForTaskActions();
     const targetA = assignmentForAssignee(t, targetAssigneeId);
-    const snoozeISO = targetA?.snooze_until ?? null;
-    const snoozeDateValue = snoozeISO ? toDateInputFromISO(snoozeISO) : "";
+
 
     const canComplete = !!targetAssigneeId && !!targetA;
     const isDoneForTarget = isAssignmentDoneForAssignee(t, targetAssigneeId);
@@ -1109,11 +1090,15 @@ export default function TasksClient() {
               {pillText}
             </span>
 
-            {t.due_at && (
-              <span style={{ ...styles.metaText, opacity: 0.9 }}>
-                Due <b>{formatDue(t.due_at)}</b>
-              </span>
-            )}
+            {(() => {
+              const effDue = effectiveDueForAssignee(t, targetAssigneeIdForTaskActions());
+              return effDue ? (
+                <span style={{ ...styles.metaText, opacity: 0.9 }}>
+                  Due <b>{formatDue(effDue)}</b>
+                </span>
+              ) : null;
+            })()}
+
 
             <div style={styles.chev}>{isExpanded ? "▲" : "▼"}</div>
           </div>
@@ -1194,42 +1179,6 @@ export default function TasksClient() {
                   style={styles.textarea}
                 />
 
-                {/* Snooze (per-user) */}
-                {targetAssigneeId && targetA ? (
-                  <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                    <div style={{ fontSize: 12, opacity: 0.85, fontWeight: 700 }}>Snooze until</div>
-
-                    <input
-                      type="date"
-                      value={snoozeDateValue}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        const next = v ? toISOFromDateInput(v) : null;
-                        void setSnoozeForUser(t.id, targetAssigneeId, next);
-                      }}
-                      style={{ ...styles.dateInput, width: 170 }}
-                      title="Hide this task for you until this date"
-                    />
-
-                    <button
-                      type="button"
-                      style={{ ...styles.smallBtn, opacity: snoozeISO ? 1 : 0.55 }}
-                      disabled={!snoozeISO}
-                      onClick={() => void setSnoozeForUser(t.id, targetAssigneeId, null)}
-                      title="Clear snooze"
-                    >
-                      Clear
-                    </button>
-
-                    {snoozeISO ? (
-                      <span style={{ fontSize: 12, opacity: 0.8 }}>
-                        (Hidden until <b>{formatDue(snoozeISO)}</b>)
-                      </span>
-                    ) : null}
-                  </div>
-                ) : null}
-
-
                 <div style={styles.taskActions}>
                   <button
                     style={styles.smallBtn}
@@ -1266,13 +1215,6 @@ export default function TasksClient() {
                   <div style={{ ...styles.metaText, whiteSpace: "pre-wrap" }}>
                     <span style={{ opacity: 0.8 }}>Note: </span>
                     <b>{t.note}</b>
-                  </div>
-                ) : null}
-
-                {/* Snooze (per-user) */}
-                {targetAssigneeId && targetA ? (
-                  <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                    ...
                   </div>
                 ) : null}
 
@@ -1431,6 +1373,15 @@ export default function TasksClient() {
 
   return (
     <div style={styles.page}>
+
+      <style jsx global>{`
+          input[type="date"]::-webkit-calendar-picker-indicator {
+            filter: invert(1);
+            opacity: 1;
+            cursor: pointer;
+          }
+        `}</style>
+
       {/* ✅ Confirm modal (Yes/No) */}
       {confirmState.open && (
         <div style={styles.modalOverlay} onClick={() => setConfirmState({ open: false, message: "" })}>
@@ -2033,7 +1984,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#ffffff",
     outline: "none",
     fontWeight: 600,
-    colorScheme: "dark",
+    colorScheme: "light",
   },
   dateInputWide: {
     width: "100%",
@@ -2043,6 +1994,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(0,0,0,0.25)",
     color: "#e5e7eb",
     outline: "none",
+    colorScheme: "light",
   },
   textarea: {
     width: "100%",

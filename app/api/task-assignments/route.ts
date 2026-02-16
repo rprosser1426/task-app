@@ -129,14 +129,16 @@ export async function PATCH(req: Request) {
         }
 
         // SET SNOOZE date for a single assignee's assignment row
-        if (action === "set_snooze") {
+        // SET DUE date for a single assignee's assignment row
+        if (action === "set_due_at" || action === "set_snooze") {
+
             const taskId = body?.taskId as string | undefined;
             const assigneeId = body?.assigneeId as string | undefined;
 
-            const snooze_until =
-                body?.snooze_until === null || body?.snooze_until === ""
+            const due_at =
+                body?.due_at === null || body?.due_at === ""
                     ? null
-                    : (body?.snooze_until as string | undefined);
+                    : (body?.due_at as string | undefined);
 
             if (!taskId || !assigneeId) {
                 return noStore({ ok: false, error: "Missing taskId or assigneeId" }, 400);
@@ -144,10 +146,10 @@ export async function PATCH(req: Request) {
 
             const { data: updated, error: upErr } = await supabaseAdmin
                 .from("task_assignments")
-                .update({ snooze_until })
+                .update({ due_at })
                 .eq("task_id", taskId)
                 .eq("assignee_id", assigneeId)
-                .select("task_id, assignee_id, snooze_until")
+                .select("task_id, assignee_id, due_at")
                 .single();
 
             if (upErr) {
@@ -194,7 +196,7 @@ export async function PATCH(req: Request) {
                     assignee_id,
                     status: "open",
                     completed_at: null,
-                    snooze_until: null,
+                    due_at: null,
                 }));
 
                 const { error: upErr } = await supabaseAdmin
