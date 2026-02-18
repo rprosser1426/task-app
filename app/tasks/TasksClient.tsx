@@ -303,7 +303,7 @@ export default function TasksClient() {
 
 
 
-  const [dueFilter, setDueFilter] = useState<DueFilter>("today");
+  const [dueFilter, setDueFilter] = useState<DueFilter>("late_today");
 
   useEffect(() => {
     if (!isAdmin) return;
