@@ -186,6 +186,94 @@ export async function GET() {
   }
 }
 
+// ---------------------------
+// Teams Webhook (server-only)
+// ---------------------------
+
+async function postToTeams(webhookUrl: string, payload: any) {
+  try {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error("Teams webhook failed:", res.status, text);
+    }
+  } catch (err) {
+    console.error("Teams webhook error:", err);
+  }
+}
+
+function buildTeamsAssignmentCard(params: {
+  subject: string;
+  note?: string | null;
+  // list of assignees for display
+  assigned: { name: string; email?: string | null }[];
+  // list of people we want to @mention (usually notify targets)
+  mentions: { name: string; email: string }[];
+}) {
+  const { subject, note, assigned, mentions } = params;
+
+  const cleanNote = (note ?? "").trim();
+
+  // Build <at>...</at> strings
+  const mentionText = mentions.length
+    ? `Hi ${mentions.map(m => `<at>${m.email}</at>`).join(", ")}`
+    : null;
+
+  // Entities must line up with the <at> tags
+  const entities = mentions.map(m => ({
+    type: "mention",
+    text: `<at>${m.email}</at>`,
+    mentioned: {
+      id: m.email,     // often works as UPN/email; if not, we’ll switch to AAD user id
+      name: m.name
+    }
+  }));
+
+  const body: any[] = [
+    { type: "TextBlock", text: "📌 Task Assigned", weight: "Bolder", size: "Medium" },
+  ];
+
+  if (mentionText) {
+    body.push({ type: "TextBlock", text: mentionText, wrap: true });
+  }
+
+  body.push({ type: "TextBlock", text: `**Subject:** ${subject}`, wrap: true });
+
+  if (cleanNote) {
+    body.push({ type: "TextBlock", text: `**Note:** ${cleanNote}`, wrap: true });
+  }
+
+  body.push({
+    type: "TextBlock",
+    text: `**Assigned to:** ${assigned.map(a => a.name).join(", ")}`,
+    wrap: true,
+  });
+
+  const card: any = {
+    type: "AdaptiveCard",
+    version: "1.4",
+    body,
+  };
+
+  if (entities.length) {
+    card.msteams = { entities };
+  }
+
+  return {
+    type: "message",
+    attachments: [{ contentType: "application/vnd.microsoft.card.adaptive", content: card }],
+  };
+}
+
+
+
+
+
 export async function POST(req: Request) {
   try {
     const sess = await getSessionFromCookie();
@@ -309,8 +397,6 @@ export async function POST(req: Request) {
       }));
 
 
-
-
       const { error: aErr } = await supabaseAdmin.from("task_assignments").insert(rows);
 
       if (aErr) {
@@ -321,6 +407,49 @@ export async function POST(req: Request) {
           { status: 400, headers: { "Cache-Control": "no-store" } }
         );
       }
+      // ✅ Teams notification ONLY if assigning to someone other than yourself
+      const webhookUrl = process.env.TEAMS_WEBHOOK_URL;
+
+      if (webhookUrl) {
+        const notifyUserIds = assignee_ids.filter((id) => id !== resolvedUserId);
+
+        if (notifyUserIds.length > 0) {
+          const { data: assignedProfiles, error: profErr } = await supabaseAdmin
+            .from("profiles")
+            .select("id, full_name, email")
+            .in("id", notifyUserIds);
+
+          if (!profErr) {
+            const assigned = (assignedProfiles ?? []).map((p: any) => ({
+              name: p.full_name || p.email || p.id,
+              email: p.email || null,
+            }));
+
+            // Mention ONLY the users we are notifying (non-self), and only if they have email
+            const mentions = (assignedProfiles ?? [])
+              .filter((p: any) => notifyUserIds.includes(p.id))
+              .map((p: any) => ({
+                name: p.full_name || p.email || p.id,
+                email: p.email,
+              }))
+              .filter((m: any) => !!m.email);
+
+            void postToTeams(
+              webhookUrl,
+              buildTeamsAssignmentCard({
+                subject: title,
+                note: note,
+                assigned,
+                mentions,
+              })
+            );
+
+
+          }
+        }
+      }
+
+
     }
 
     return NextResponse.json({ ok: true, id: taskId }, { headers: { "Cache-Control": "no-store" } });
@@ -360,6 +489,8 @@ export async function DELETE(req: Request) {
         { ok: false, error: aErr.message },
         { status: 400, headers: { "Cache-Control": "no-store" } }
       );
+
+
     }
 
     const { error: tErr } = await supabaseAdmin.from("tasks").delete().eq("id", id);
