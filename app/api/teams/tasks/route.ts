@@ -95,7 +95,13 @@ export async function POST(req: Request) {
 
     // Choose a single “created_by/user_id” that satisfies your schema.
     // Using first owner id is a sensible default.
-    const createdBy = ownerIds[0];
+    const createdBy = process.env.TEAMS_SYSTEM_ACCESS_CODE_ID || "";
+    if (!createdBy) {
+      return NextResponse.json(
+        { error: "Server not configured", detail: "Missing TEAMS_SYSTEM_ACCESS_CODE_ID" },
+        { status: 500 }
+      );
+    }
 
     // ---- insert task ----
     const { data: createdTask, error: taskErr } = await supabaseAdmin
