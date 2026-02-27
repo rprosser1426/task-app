@@ -442,14 +442,19 @@ export default function TasksClient() {
 
       if (!matchesDueFilter(myEffectiveDue, dueFilter)) return false;
 
-
+      // ✅ User-only: "owned only"
+      if (!isAdmin && userShowOwnedOnly) {
+        const myId = userId || accessCodeId;
+        if (!myId) return false;
+        if (!isOwner(t, myId)) return false;
+      }
 
       const mine = myAssignmentForTask(t);
       if (!mine) return false;
 
       return mine.status !== "complete";
     });
-  }, [tasks, userId, accessCodeId, expandedTaskId, dueFilter, categoryFilter, searchText]);
+  }, [tasks, userId, accessCodeId, expandedTaskId, dueFilter, categoryFilter, searchText, userShowOwnedOnly]);
 
 
 
@@ -485,11 +490,17 @@ export default function TasksClient() {
 
       if (!matchesSearch(t, searchText)) return false;
 
+      if (!isAdmin && userShowOwnedOnly) {
+        const myId = userId || accessCodeId;
+        if (!myId) return false;
+        if (!isOwner(t, myId)) return false;
+      }
+
       const mine = myAssignmentForTask(t);
       if (!mine) return false;
       return mine.status === "complete";
     });
-  }, [tasks, userId, accessCodeId, dueFilter, categoryFilter, searchText]);
+  }, [tasks, userId, accessCodeId, dueFilter, categoryFilter, searchText, userShowOwnedOnly]);
 
 
   const unassignedTasks = useMemo(() => {
@@ -677,11 +688,45 @@ export default function TasksClient() {
   }, [userShowOwnedOnly]);
 
 
+  // ✅ Global "busy" overlay (prevents double-clicks + looks professional)
+  const [busyText, setBusyText] = useState<string | null>(null);
+  const busy = busyText !== null;
+
 
   useEffect(() => {
     loadSessionAndTasks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ✅ Auto-refresh (Teams embedded webview doesn't live-update across users)
+  const refreshLockRef = useRef(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const intervalMs = 120_000; // 60s (change to 120_000 for 2 minutes)
+
+    const id = window.setInterval(async () => {
+      // Don't refresh in the background tab (saves noise + server load)
+      if (document.visibilityState !== "visible") return;
+
+      // Don't refresh while an action spinner is up (prevents "jumps" during actions)
+      if (busy || addOpen || editTaskId) return;
+
+      // Prevent overlapping refresh calls
+      if (refreshLockRef.current) return;
+      refreshLockRef.current = true;
+
+      try {
+        await loadSessionAndTasks();
+      } finally {
+        refreshLockRef.current = false;
+      }
+    }, intervalMs);
+
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy]);
 
   async function addTask() {
     setErrorMsg(null);
@@ -699,6 +744,8 @@ export default function TasksClient() {
     if (addLockRef.current) return;
     addLockRef.current = true;
     setAdding(true);
+
+    setBusyText("Adding task…");
 
     try {
       const due_at = newDueDate ? toISOFromDateInput(newDueDate) : new Date().toISOString();
@@ -737,14 +784,23 @@ export default function TasksClient() {
     } finally {
       setAdding(false);
       addLockRef.current = false;
+
+      setBusyText(null);
     }
   }
 
-  async function setAssignmentStatusForUser(taskId: string, assigneeId: string, nextStatus: "open" | "complete") {
+  async function setAssignmentStatusForUser(
+    taskId: string,
+    assigneeId: string,
+    nextStatus: "open" | "complete"
+  ) {
     setErrorMsg(null);
 
     const action = nextStatus === "complete" ? "complete" : "reopen";
     console.log("PATCH /api/task-assignments payload:", { action, taskId, assigneeId });
+
+    // ✅ show spinner overlay
+    setBusyText(nextStatus === "complete" ? "Completing task…" : "Reopening task…");
 
     try {
       const res = await fetch("/api/task-assignments", {
@@ -783,8 +839,19 @@ export default function TasksClient() {
           return { ...t, task_assignments: updated };
         })
       );
+
+      // ✅ Clear expanded view so list doesn’t look empty after completion
+      if (expandedTaskId === taskId) {
+        setExpandedTaskId(null);
+      }
+
+      // ✅ recommended: sync from server so admin/user views stay consistent
+      await loadSessionAndTasks();
     } catch (e: any) {
       setErrorMsg(e?.message || "Failed to update assignment.");
+    } finally {
+      // ✅ ALWAYS turn spinner off
+      setBusyText(null);
     }
   }
 
@@ -872,37 +939,53 @@ export default function TasksClient() {
   async function deleteTask(taskId: string) {
     setErrorMsg(null);
 
+    // ✅ Step 1: ask for confirmation first
     setConfirmState({
       open: true,
       message: "Are you sure you want to delete this task?",
-      onYes: async () => {
-        setErrorMsg(null);
+      onYes: () => {
+        // run the real delete after user clicks "Yes"
+        void (async () => {
+          if (busy) return;
 
-        try {
-          const res = await fetch(`/api/tasks?id=${encodeURIComponent(taskId)}`, {
-            method: "DELETE",
-            credentials: "include",
-            cache: "no-store",
-            headers: { Accept: "application/json" },
-          });
+          setErrorMsg(null);
+          setBusyText("Deleting task…");
 
-          const j = await res.json().catch(() => ({ ok: false }));
-          if (!res.ok || !j?.ok) {
-            throw new Error(j?.error || "Failed deleting task via /api/tasks");
+          try {
+            const res = await fetch(`/api/tasks?id=${encodeURIComponent(taskId)}`, {
+              method: "DELETE",
+              credentials: "include",
+              cache: "no-store",
+              headers: { Accept: "application/json" },
+            });
+
+            const raw = await res.text();
+
+            let j: any = null;
+            try {
+              j = raw ? JSON.parse(raw) : null;
+            } catch { }
+
+            if (!res.ok || !j?.ok) {
+              const msg = j?.error || j?.message || raw || `Failed to delete task (${res.status})`;
+              throw new Error(msg);
+            }
+
+            // ✅ optimistic remove
+            setTasks((prev) => prev.filter((t) => t.id !== taskId));
+
+            // ✅ if expanded/editing, clean up UI state
+            if (expandedTaskId === taskId) setExpandedTaskId(null);
+            if (editTaskId === taskId) cancelEdit();
+
+            // ✅ refresh from server to stay consistent
+            await loadSessionAndTasks();
+          } catch (e: any) {
+            setErrorMsg(e?.message || "Failed to delete task.");
+          } finally {
+            setBusyText(null);
           }
-
-          setTasks((prev) => prev.filter((t) => t.id !== taskId));
-          setAssignmentDraft((prev) => {
-            const copy = { ...prev };
-            delete copy[taskId];
-            return copy;
-          });
-
-          if (editTaskId === taskId) cancelEdit();
-          setExpandedTaskId((prev) => (prev === taskId ? null : prev));
-        } catch (e: any) {
-          setErrorMsg(e?.message || "Failed deleting task.");
-        }
+        })();
       },
     });
   }
@@ -913,6 +996,9 @@ export default function TasksClient() {
 
     if (savingAssignments[taskId]) return;
     setSavingAssignments((prev) => ({ ...prev, [taskId]: true }));
+
+    // ✅ show spinner overlay while assigning/unassigning
+    setBusyText("Updating assignments…");
 
     try {
       const res = await fetch("/api/task-assignments", {
@@ -937,6 +1023,8 @@ export default function TasksClient() {
       setErrorMsg(e?.message || "Failed assigning task.");
     } finally {
       setSavingAssignments((prev) => ({ ...prev, [taskId]: false }));
+      // ✅ ALWAYS turn spinner off
+      setBusyText(null);
     }
   }
 
@@ -1130,14 +1218,28 @@ export default function TasksClient() {
           </div>
         ) : null}
 
-        {isAdmin && !isExpanded ? (
+        {!isExpanded ? (
           <div style={styles.assigneePillsWrap}>
-            {assignees.length === 0 ? (
-              <span style={{ ...styles.assigneePill, opacity: 0.75 }}>No one</span>
-            ) : (
-              assignees.map((uid) => {
+            {(() => {
+              const allAssignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
+              const myId = userId || accessCodeId || null;
+
+              const ownerIds = allAssignees.filter((uid) => isOwner(t, uid));
+
+              // Admin: show everyone.
+              // User: show Owner(s) + Me (so the collapsed card always answers “who owns this / who is it assigned to?”)
+              const visibleIds = isAdmin
+                ? allAssignees
+                : Array.from(new Set([...(ownerIds.length ? ownerIds : []), ...(myId ? [myId] : [])]));
+
+              if (visibleIds.length === 0) {
+                return <span style={{ ...styles.assigneePill, opacity: 0.75 }}>No one</span>;
+              }
+
+              return visibleIds.map((uid) => {
                 const done = isAssignmentDone(t, uid);
-                const owner = isOwner(t, uid); // ✅ uses your helper (assignment.is_owner)
+                const owner = isOwner(t, uid);
+                const isMe = !!myId && uid === myId;
 
                 return (
                   <span
@@ -1147,15 +1249,15 @@ export default function TasksClient() {
                       ...(done ? styles.assigneePillDone : styles.assigneePillOpen),
                       ...(owner ? styles.assigneePillOwner : null),
                     }}
-                    title={`${done ? "Done" : "Open"}${owner ? " • Owner" : ""}`}
+                    title={`${done ? "Done" : "Open"}${owner ? " • Owner" : ""}${isMe ? " • Me" : ""}`}
                   >
                     {displayUserName(uid)}
                     {owner ? " ★" : ""}
+                    {!owner && isMe ? " (me)" : ""}
                   </span>
                 );
-              })
-
-            )}
+              });
+            })()}
           </div>
         ) : null}
 
@@ -1198,10 +1300,18 @@ export default function TasksClient() {
                   >
                     Cancel
                   </button>
+
                   <button
-                    style={styles.smallDanger}
+                    type="button"
+                    style={{
+                      ...styles.smallBtnDanger,
+                      opacity: busy ? 0.55 : 1,
+                      cursor: busy ? "not-allowed" : "pointer",
+                    }}
+                    disabled={busy}
                     onClick={(e) => {
                       e.stopPropagation();
+                      if (busy) return;
                       void deleteTask(t.id);
                     }}
                   >
@@ -1337,17 +1447,19 @@ export default function TasksClient() {
                   <button
                     style={{
                       ...styles.smallBtn,
-                      opacity: canComplete ? 1 : 0.55,
-                      cursor: canComplete ? "pointer" : "not-allowed",
+                      opacity: canComplete && !busy ? 1 : 0.55,
+                      cursor: canComplete && !busy ? "pointer" : "not-allowed",
                     }}
-                    disabled={!canComplete}
+                    disabled={!canComplete || busy}
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (!targetAssigneeId) return;
+                      if (!targetAssigneeId || busy) return;
                       void setAssignmentStatusForUser(t.id, targetAssigneeId, isDoneForTarget ? "open" : "complete");
                     }}
                     title={
-                      isAdmin ? (targetAssigneeId ? "" : "Expand a user bucket first") : "You are not assigned to this task"
+                      isAdmin
+                        ? (targetAssigneeId ? "" : "Expand a user bucket first")
+                        : "You are not assigned to this task"
                     }
                   >
                     {isDoneForTarget ? "Reopen" : "Complete"}
@@ -1373,6 +1485,28 @@ export default function TasksClient() {
 
   return (
     <div style={styles.page}>
+
+      {/* ✅ Busy overlay (admin + user) */}
+      {busy && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.busyCard}>
+            <div style={styles.spinner} aria-hidden="true" />
+            <div style={{ display: "grid", gap: 4 }}>
+              <div style={{ fontWeight: 900 }}>Working…</div>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>{busyText}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✅ Spinner keyframes */}
+      <style jsx global>{`
+        @keyframes taskapp_spin {
+          to {
+            transform: rotate(360deg);
+          }
+        }
+      `}</style>
 
       <style jsx global>{`
           input[type="date"]::-webkit-calendar-picker-indicator {
@@ -1408,6 +1542,8 @@ export default function TasksClient() {
         </div>
       )}
 
+
+
       <div style={styles.shell}>
         <header style={styles.header}>
           <div style={styles.brand}>
@@ -1418,7 +1554,8 @@ export default function TasksClient() {
                 Signed in as <b>{userEmail || "—"}</b>
               </div>
             </div>
-          </div>
+          </div>.
+
 
           <button style={styles.ghostBtn} onClick={signOut}>
             Sign out
@@ -1451,20 +1588,7 @@ export default function TasksClient() {
                   {showClosed ? "Hide Closed" : "Show Closed"}
                 </button>
 
-                {!isAdmin && (
-                  <button
-                    type="button"
-                    style={{
-                      ...styles.smallBtn,
-                      opacity: userShowOwnedOnly ? 1 : 0.75,
-                      borderColor: userShowOwnedOnly ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.18)",
-                    }}
-                    onClick={() => setUserShowOwnedOnly((v) => !v)}
-                    title="Show only tasks where I'm the owner"
-                  >
-                    {userShowOwnedOnly ? "Showing: Owned Only" : "Show only tasks I own"}
-                  </button>
-                )}
+
 
 
                 <input
@@ -1473,7 +1597,6 @@ export default function TasksClient() {
                   placeholder="Search tasks…"
                   style={{ ...styles.input, maxWidth: 260, minWidth: 220 }}
                 />
-
 
                 <select
                   value={dueFilter}
@@ -1898,7 +2021,23 @@ export default function TasksClient() {
             }}
           >
             <section style={styles.column}>
-              <div style={styles.colTitle}>Open</div>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                <div style={styles.colTitle}>Open</div>
+
+                <button
+                  type="button"
+                  style={{
+                    ...styles.smallBtn,
+                    opacity: userShowOwnedOnly ? 1 : 0.75,
+                    borderColor: userShowOwnedOnly ? "rgba(34,197,94,0.55)" : "rgba(255,255,255,0.18)",
+                    whiteSpace: "nowrap",
+                  }}
+                  onClick={() => setUserShowOwnedOnly((v) => !v)}
+                  title="Show only tasks where I'm the owner"
+                >
+                  {userShowOwnedOnly ? "Owned Only" : "Show Owned Only"}
+                </button>
+              </div>
               {openTasks.length === 0 ? <div style={styles.empty}>No open tasks yet.</div> : <>{openTasks.map(renderTaskCard)}</>}
             </section>
 
@@ -2250,6 +2389,28 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 9999,
     padding: 16,
   },
+
+  busyCard: {
+    width: "min(520px, 100%)",
+    borderRadius: 16,
+    padding: 16,
+    background: "rgba(10, 15, 30, 0.98)",
+    border: "1px solid rgba(255,255,255,0.16)",
+    boxShadow: "0 18px 50px rgba(0,0,0,0.60)",
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  },
+
+  spinner: {
+    width: 18,
+    height: 18,
+    borderRadius: "50%",
+    border: "3px solid rgba(255,255,255,0.18)",
+    borderTopColor: "rgba(255,255,255,0.85)",
+    animation: "taskapp_spin 0.8s linear infinite",
+  },
+
   modalCard: {
     width: "min(520px, 100%)",
     borderRadius: 16,
