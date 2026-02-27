@@ -883,6 +883,8 @@ export default function TasksClient() {
       return;
     }
 
+    // show global busy overlay so users know the app is working
+    setBusyText("Saving changes…");
 
     try {
       const due_at = toISOFromDateInput(editDueDate);
@@ -912,7 +914,7 @@ export default function TasksClient() {
         throw new Error(msg);
       }
 
-      // ✅ Save due date for THIS assignee only (not global task)
+      // Save due date for THIS assignee only (not global task)
       const assigneeId = targetAssigneeIdForTaskActions();
       if (assigneeId && editDueDate) {
         await fetch("/api/task-assignments", {
@@ -928,11 +930,13 @@ export default function TasksClient() {
         });
       }
 
-
       await loadSessionAndTasks();
       cancelEdit();
     } catch (e: any) {
       setErrorMsg(e?.message || "Failed saving edit.");
+    } finally {
+      // ALWAYS clear busy overlay
+      setBusyText(null);
     }
   }
 
