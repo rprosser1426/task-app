@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import TaskNotesModal from "@/app/features/notes/TaskNotesModal";
 
 const SHOW_CLOSED_KEY = "taskapp_showClosed"; // ✅ MUST be here
 const ADMIN_USER_FILTER_KEY = "taskapp_adminUserFilterId";
@@ -242,6 +243,16 @@ export default function TasksClient() {
   const [assignOpen, setAssignOpen] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
 
+  // --------------------
+  // Shared Notes modal state
+  // --------------------
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notesTaskId, setNotesTaskId] = useState<string | null>(null);
+  const [notesTaskTitle, setNotesTaskTitle] = useState<string>("");
+
+  // Badge counts (optional but we’ll use it for Notes (3))
+  const [notesCountByTaskId, setNotesCountByTaskId] = useState<Record<string, number>>({});
+
   const [adding, setAdding] = useState(false);
   const addLockRef = useRef(false);
   const didInitAdminFilterRef = useRef(false);
@@ -405,6 +416,38 @@ export default function TasksClient() {
       await loadSessionAndTasks();
     } catch (e: any) {
       setErrorMsg(e?.message || "Failed to set owner.");
+    }
+  }
+
+  async function loadNotesCountsForTasks(taskIds: string[]) {
+    if (taskIds.length === 0) {
+      setNotesCountByTaskId({});
+      return;
+    }
+
+    try {
+      // ✅ Adjust this URL to match the file you already created
+      // Common: /api/task-notes/counts
+      const res = await fetch("/api/task-notes/counts", {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Cache-Control": "no-store",
+        },
+        body: JSON.stringify({ taskIds }),
+      });
+
+      const j = await res.json().catch(() => ({ ok: false }));
+      if (!res.ok || !j?.ok) throw new Error(j?.error || "Failed to load note counts");
+
+      // j.counts should be like: { [taskId]: number }
+      setNotesCountByTaskId(j.counts ?? {});
+    } catch (e) {
+      // Don’t hard-fail the whole screen if counts fail
+      console.warn("Failed to load note counts:", e);
     }
   }
 
@@ -636,6 +679,8 @@ export default function TasksClient() {
         task_assignments: normalizeAssignments(t.task_assignments),
       }));
 
+      await loadNotesCountsForTasks(normalizedTaskRows.map((t) => t.id));
+
       setTasks((prev) => {
         const merged = preserveDoneAssignments(prev, normalizedTaskRows);
 
@@ -711,7 +756,7 @@ export default function TasksClient() {
       if (document.visibilityState !== "visible") return;
 
       // Don't refresh while an action spinner is up (prevents "jumps" during actions)
-      if (busy || addOpen || editTaskId) return;
+      if (busy || addOpen || editTaskId || notesOpen) return;
 
       // Prevent overlapping refresh calls
       if (refreshLockRef.current) return;
@@ -726,7 +771,7 @@ export default function TasksClient() {
 
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy]);
+  }, [busy, addOpen, editTaskId, notesOpen]);
 
   async function addTask() {
     setErrorMsg(null);
@@ -1115,6 +1160,18 @@ export default function TasksClient() {
     return list.filter((t) => isAssignmentDone(t, uid)).length;
   }
 
+  function openNotesForTask(t: TaskRow) {
+    setNotesTaskId(t.id);
+    setNotesTaskTitle(t.title);
+    setNotesOpen(true);
+  }
+
+  function closeNotesModal() {
+    setNotesOpen(false);
+    setNotesTaskId(null);
+    setNotesTaskTitle("");
+  }
+
   function renderTaskCard(t: TaskRow) {
 
 
@@ -1191,6 +1248,27 @@ export default function TasksClient() {
               ) : null;
             })()}
 
+            {(() => {
+              const count = notesCountByTaskId[t.id] ?? 0;
+              const label = count > 0 ? `Notes (${count})` : "Notes";
+              return (
+                <button
+                  type="button"
+                  style={{
+                    ...styles.smallBtn,
+                    padding: "6px 10px",
+                    whiteSpace: "nowrap",
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation(); // don't expand/collapse card
+                    openNotesForTask(t);
+                  }}
+                  title="View task notes"
+                >
+                  {label}
+                </button>
+              );
+            })()}
 
             <div style={styles.chev}>{isExpanded ? "▲" : "▼"}</div>
           </div>
@@ -1211,10 +1289,18 @@ export default function TasksClient() {
             style={{
               ...styles.metaText,
               marginTop: 6,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
               opacity: 0.9,
+
+              // ✅ allow wrapping
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+              wordBreak: "break-word",
+
+              // ✅ keep collapsed view compact (2 lines)
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
             }}
             title={t.note}
           >
@@ -1546,7 +1632,18 @@ export default function TasksClient() {
         </div>
       )}
 
-
+      <TaskNotesModal
+        open={notesOpen}
+        taskId={notesTaskId}
+        taskTitle={notesTaskTitle}
+        onClose={closeNotesModal}
+        displayUserName={displayUserName}
+        busy={busy}
+        setBusyText={setBusyText}
+        onNotesCountChange={(taskId: string, count: number) => {
+          setNotesCountByTaskId((prev) => ({ ...prev, [taskId]: count }));
+        }}
+      />
 
       <div style={styles.shell}>
         <header style={styles.header}>
