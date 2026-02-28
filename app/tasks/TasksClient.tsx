@@ -253,6 +253,10 @@ export default function TasksClient() {
   // Badge counts (optional but we’ll use it for Notes (3))
   const [notesCountByTaskId, setNotesCountByTaskId] = useState<Record<string, number>>({});
 
+  const [notesSummaryByTaskId, setNotesSummaryByTaskId] = useState<
+    Record<string, { count: number; last_note: string | null; last_author_id: string | null; last_created_at: string | null }>
+  >({});
+
   const [adding, setAdding] = useState(false);
   const addLockRef = useRef(false);
   const didInitAdminFilterRef = useRef(false);
@@ -678,6 +682,32 @@ export default function TasksClient() {
         due_at: t.due_at ?? null,
         task_assignments: normalizeAssignments(t.task_assignments),
       }));
+
+      const allTaskIds = normalizedTaskRows.map((t) => t.id).filter(Boolean);
+
+      if (allTaskIds.length) {
+        const qs = encodeURIComponent(allTaskIds.join(","));
+        const rr = await fetch(`/api/task-notes/counts?taskIds=${qs}`, {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+
+        const jj = await rr.json().catch(() => ({ ok: false }));
+        if (rr.ok && jj?.ok) {
+          const byTaskId = (jj.byTaskId ?? {}) as Record<string, any>;
+
+          setNotesSummaryByTaskId(byTaskId);
+
+          // keep your existing counts map in sync (used for label)
+          const counts: Record<string, number> = {};
+          for (const [tid, v] of Object.entries(byTaskId)) {
+            counts[tid] = Number((v as any)?.count ?? 0);
+          }
+          setNotesCountByTaskId(counts);
+        }
+      }
 
       await loadNotesCountsForTasks(normalizedTaskRows.map((t) => t.id));
 
@@ -1174,6 +1204,13 @@ export default function TasksClient() {
 
   function renderTaskCard(t: TaskRow) {
 
+    const s = notesSummaryByTaskId[t.id];
+    const tooltip =
+      s && s.count > 0
+        ? `Last note by ${displayUserName(s.last_author_id || "")}\n${s.last_note || ""}\n${s.last_created_at ? new Date(s.last_created_at).toLocaleString() : ""
+        }`
+        : "No notes yet";
+
 
     const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
     const isSaving = !!savingAssignments[t.id];
@@ -1263,7 +1300,7 @@ export default function TasksClient() {
                     e.stopPropagation(); // don't expand/collapse card
                     openNotesForTask(t);
                   }}
-                  title="View task notes"
+                  title={tooltip}
                 >
                   {label}
                 </button>

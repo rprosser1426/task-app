@@ -15,6 +15,7 @@ type Props = {
     setBusyText(text: string | null): void;
 
     onNotesCountChange?: (taskId: string, count: number) => void;
+    onNotesSummaryChange?: (taskId: string, summary: { count: number; last_note: string | null; last_author_id: string | null; last_created_at: string | null }) => void;
 };
 
 function formatDate(iso: string) {
@@ -33,6 +34,7 @@ export default function TaskNotesModal({
     displayUserName,
     setBusyText,
     onNotesCountChange,
+    onNotesSummaryChange,
 }: Props) {
     const [notes, setNotes] = useState<TaskNote[]>([]);
     const [text, setText] = useState("");
@@ -50,6 +52,15 @@ export default function TaskNotesModal({
             const list = await fetchTaskNotes(taskId);
             setNotes(list);
             onNotesCountChange?.(taskId, list.length);
+
+            const latest = list?.[0] ?? null;
+
+            onNotesSummaryChange?.(taskId, {
+                count: list.length,
+                last_note: latest?.note ?? null,
+                last_author_id: latest?.author_id ?? null,
+                last_created_at: latest?.created_at ?? null,
+            });
         } catch (e: any) {
             setError(e?.message || "Failed to load notes.");
         } finally {
