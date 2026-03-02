@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import TaskNotesModal from "@/app/features/notes/TaskNotesModal";
+import { htmlToPlainText, truncate } from "@/lib/htmlToPlainText";
 
 const SHOW_CLOSED_KEY = "taskapp_showClosed"; // ✅ MUST be here
 const ADMIN_USER_FILTER_KEY = "taskapp_adminUserFilterId";
@@ -41,6 +42,8 @@ type AssignmentRow = {
 };
 
 
+
+
 type TaskRow = {
   id: string;
   title: string;
@@ -65,6 +68,7 @@ type SessionShape = {
 function toISOFromDateInput(dateStr: string) {
   return new Date(`${dateStr}T12:00:00`).toISOString();
 }
+
 
 function preserveDoneAssignments(prev: TaskRow[], next: TaskRow[]): TaskRow[] {
   if (!prev?.length) return next;
@@ -230,6 +234,7 @@ export default function TasksClient() {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [hoveredTaskId, setHoveredTaskId] = useState<string | null>(null);
+  const [hoveredNotesTaskId, setHoveredNotesTaskId] = useState<string | null>(null);
 
   const [newTitle, setNewTitle] = useState("");
   const [newNote, setNewNote] = useState("");
@@ -261,8 +266,7 @@ export default function TasksClient() {
   const addLockRef = useRef(false);
   const didInitAdminFilterRef = useRef(false);
   const assignWrapRef = useRef<HTMLDivElement | null>(null);
-
-
+  const notesHoverCloseTimerRef = useRef<number | null>(null);
 
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -312,6 +316,8 @@ export default function TasksClient() {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem(USER_SHOW_OWNED_ONLY_KEY) === "true";
   });
+
+
 
 
 
@@ -1204,14 +1210,6 @@ export default function TasksClient() {
 
   function renderTaskCard(t: TaskRow) {
 
-    const s = notesSummaryByTaskId[t.id];
-    const tooltip =
-      s && s.count > 0
-        ? `Last note by ${displayUserName(s.last_author_id || "")}\n${s.last_note || ""}\n${s.last_created_at ? new Date(s.last_created_at).toLocaleString() : ""
-        }`
-        : "No notes yet";
-
-
     const assignees = (t.task_assignments ?? []).map((a) => a.assignee_id);
     const isSaving = !!savingAssignments[t.id];
     const draftIds = assignmentDraft[t.id] ?? assignees;
@@ -1288,22 +1286,90 @@ export default function TasksClient() {
             {(() => {
               const count = notesCountByTaskId[t.id] ?? 0;
               const label = count > 0 ? `Notes (${count})` : "Notes";
+
+              const noteSummary = notesSummaryByTaskId[t.id] ?? null;
+
+              const authorName =
+                noteSummary?.last_author_id ? displayUserName(noteSummary.last_author_id) : "";
+
+              const tipWhen =
+                noteSummary?.last_created_at
+                  ? new Date(noteSummary.last_created_at).toLocaleString()
+                  : "";
+
+              const notePretty =
+                noteSummary?.last_note
+                  ? truncate(htmlToPlainText(noteSummary.last_note), 240)
+                  : "";
+
+              const tipTitle =
+                noteSummary && (noteSummary.count ?? 0) > 0
+                  ? `Last note by ${authorName || "Unknown"}`
+                  : "Notes";
+
+              const tipBodyRaw =
+                noteSummary && (noteSummary.count ?? 0) > 0
+                  ? (notePretty || "(empty)")
+                  : "No notes yet.";
+
+              // ✅ Normalize spacing and bullet layout
+              const tipBody = tipBodyRaw
+                .replace(/\r\n/g, "\n")
+                .replace(/\s*•\s*/g, "\n• ")   // force each bullet to new line
+                .replace(/\n{3,}/g, "\n\n")   // collapse huge blank gaps
+                .trim();
               return (
-                <button
-                  type="button"
-                  style={{
-                    ...styles.smallBtn,
-                    padding: "6px 10px",
-                    whiteSpace: "nowrap",
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation(); // don't expand/collapse card
-                    openNotesForTask(t);
-                  }}
-                  title={tooltip}
-                >
-                  {label}
-                </button>
+                <div style={{ position: "relative" }}>
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.smallBtn,
+                      padding: "6px 10px",
+                      whiteSpace: "nowrap",
+                    }}
+                    onMouseEnter={() => {
+                      if (notesHoverCloseTimerRef.current) {
+                        window.clearTimeout(notesHoverCloseTimerRef.current);
+                        notesHoverCloseTimerRef.current = null;
+                      }
+                      setHoveredNotesTaskId(t.id);
+                    }}
+                    onMouseLeave={() => {
+                      notesHoverCloseTimerRef.current = window.setTimeout(() => {
+                        setHoveredNotesTaskId(null);
+                      }, 150);
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openNotesForTask(t);
+                    }}
+                  >
+                    {label}
+                  </button>
+
+                  {hoveredNotesTaskId === t.id && (
+                    <div
+                      style={styles.notesTooltip}
+                      onMouseEnter={() => {
+                        if (notesHoverCloseTimerRef.current) {
+                          window.clearTimeout(notesHoverCloseTimerRef.current);
+                          notesHoverCloseTimerRef.current = null;
+                        }
+                        setHoveredNotesTaskId(t.id);
+                      }}
+                      onMouseLeave={() => {
+                        setHoveredNotesTaskId(null);
+                      }}
+                    >
+                      <div style={{ fontWeight: 900, marginBottom: 6 }}>{tipTitle}</div>
+                      {tipWhen ? (
+                        <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 8 }}>{tipWhen}</div>
+                      ) : null}
+
+                      <div style={styles.notesTooltipBody}>{tipBody}</div>
+                    </div>
+                  )}
+                </div>
               );
             })()}
 
@@ -1431,7 +1497,7 @@ export default function TasksClient() {
                   <button
                     type="button"
                     style={{
-                      ...styles.smallBtnDanger,
+                      ...styles.smallDanger,
                       opacity: busy ? 0.55 : 1,
                       cursor: busy ? "not-allowed" : "pointer",
                     }}
@@ -2324,6 +2390,30 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 8px 18px rgba(0,0,0,0.35)",
     marginBottom: 14,
     cursor: "pointer",
+  },
+
+  notesTooltip: {
+    position: "absolute",
+    top: "calc(100% + 8px)",
+    right: 0,
+    width: 360,
+    maxWidth: "70vw",
+    zIndex: 2000,
+    borderRadius: 12,
+    padding: 12,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(10, 15, 30, 0.98)",
+    boxShadow: "0 18px 40px rgba(0,0,0,0.55)",
+    backdropFilter: "blur(8px)",
+  },
+
+
+  notesTooltipBody: {
+    fontSize: 13,
+    lineHeight: 1.35,
+    whiteSpace: "pre-line",   // ✅ preserves new lines + bullets
+    overflowWrap: "anywhere",
+    opacity: 0.95,
   },
 
 
