@@ -429,6 +429,33 @@ export default function TasksClient() {
     }
   }
 
+  async function refreshNotesSummaryForTask(taskId: string) {
+    try {
+      const qs = encodeURIComponent(taskId); // single task id
+      const rr = await fetch(`/api/task-notes/counts?taskIds=${qs}`, {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+
+      const jj = await rr.json().catch(() => ({ ok: false }));
+      if (!rr.ok || !jj?.ok) return;
+
+      const byTaskId = (jj.byTaskId ?? {}) as Record<string, any>;
+      const v = byTaskId[taskId];
+      if (!v) return;
+
+      // update summary map (tooltip reads from this)
+      setNotesSummaryByTaskId((prev) => ({ ...prev, [taskId]: v }));
+
+      // keep count map in sync (button label reads from this)
+      setNotesCountByTaskId((prev) => ({ ...prev, [taskId]: Number(v?.count ?? 0) }));
+    } catch (e) {
+      console.warn("refreshNotesSummaryForTask failed:", e);
+    }
+  }
+
   async function loadNotesCountsForTasks(taskIds: string[]) {
     if (taskIds.length === 0) {
       setNotesCountByTaskId({});
@@ -1203,9 +1230,15 @@ export default function TasksClient() {
   }
 
   function closeNotesModal() {
+    const tid = notesTaskId; // capture before we clear it
+
     setNotesOpen(false);
     setNotesTaskId(null);
     setNotesTaskTitle("");
+
+    if (tid) {
+      void refreshNotesSummaryForTask(tid);
+    }
   }
 
   function renderTaskCard(t: TaskRow) {
