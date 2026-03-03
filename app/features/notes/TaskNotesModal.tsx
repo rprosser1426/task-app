@@ -291,7 +291,15 @@ export default function TaskNotesModal({
                         ) : notes.length === 0 ? (
                             <div style={styles.muted}>No notes yet.</div>
                         ) : (
-                            (expandedId ? notes.filter((n) => n.id === expandedId) : notes).map((n) => {
+                            (
+                                expandedId
+                                    ? notes.filter((n) => n.id === expandedId)
+                                    : [...notes].sort((a, b) => {
+                                        const aa = new Date(a.created_at).getTime();
+                                        const bb = new Date(b.created_at).getTime();
+                                        return bb - aa; // newest first
+                                    })
+                            ).map((n) => {
                                 const isOpen = expandedId === n.id;
 
                                 return (
