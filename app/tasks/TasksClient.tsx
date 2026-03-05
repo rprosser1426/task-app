@@ -69,6 +69,18 @@ function toISOFromDateInput(dateStr: string) {
   return new Date(`${dateStr}T12:00:00`).toISOString();
 }
 
+function formatCompletedAt(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 
 function preserveDoneAssignments(prev: TaskRow[], next: TaskRow[]): TaskRow[] {
   if (!prev?.length) return next;
@@ -1467,6 +1479,16 @@ export default function TasksClient() {
                 const owner = isOwner(t, uid);
                 const isMe = !!myId && uid === myId;
 
+                const a = assignmentForAssignee(t, uid);
+                const completedPretty =
+                  done && a?.completed_at ? formatCompletedAt(a.completed_at) : "";
+
+                const titleParts: string[] = [];
+                titleParts.push(done ? "Done" : "Open");
+                if (owner) titleParts.push("Owner");
+                if (isMe) titleParts.push("Me");
+                if (completedPretty) titleParts.push(`Completed: ${completedPretty}`);
+
                 return (
                   <span
                     key={uid}
@@ -1475,7 +1497,7 @@ export default function TasksClient() {
                       ...(done ? styles.assigneePillDone : styles.assigneePillOpen),
                       ...(owner ? styles.assigneePillOwner : null),
                     }}
-                    title={`${done ? "Done" : "Open"}${owner ? " • Owner" : ""}${isMe ? " • Me" : ""}`}
+                    title={titleParts.join(" • ")}
                   >
                     {displayUserName(uid)}
                     {owner ? " ★" : ""}
