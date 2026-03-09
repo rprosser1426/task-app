@@ -360,6 +360,8 @@ export default function TasksClient() {
   const [categoryFilter, setCategoryFilter] = useState<string>("__all__");
   const [searchText, setSearchText] = useState<string>("");
 
+  const hasSearch = searchText.trim().length > 0;
+
 
 
   function toggleExpandedUser(uid: string) {
@@ -506,48 +508,34 @@ export default function TasksClient() {
     if (!userId && !accessCodeId) return [];
 
     return tasks.filter((t) => {
-      // 👇 NEW: hide other tasks when one is expanded
       if (expandedTaskId && t.id !== expandedTaskId) return false;
-      // ✅ Category filter (user screen)
-      if (categoryFilter !== "__all__" && t.category_id !== categoryFilter) return false;
 
-      if (!matchesSearch(t, searchText)) return false;
+      const mine = myAssignmentForTask(t);
+      if (!mine) return false;
 
-      // ✅ Category filter
-      if (categoryFilter !== "__all__" && t.category_id !== categoryFilter) {
-        return false;
+      // ✅ Search mode: bypass all other filters, but OPEN ONLY
+      if (hasSearch) {
+        if (!matchesSearch(t, searchText)) return false;
+        return mine.status !== "complete";
       }
 
+      if (categoryFilter !== "__all__" && t.category_id !== categoryFilter) return false;
 
-      // ✅ Only hide future-dated tasks when a specific due filter is selected.
-      // If "All (visible)" is selected, show everything (including future).
       const myId = userId || accessCodeId || null;
       const myEffectiveDue = effectiveDueForAssignee(t, myId);
 
       if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(myEffectiveDue)) return false;
-
-
-      if (dueFilter === "today") {
-        console.log("DUE DEBUG", t.id, t.title, t.due_at, "bucket=", dueBucket(t.due_at));
-      }
-
-
       if (!matchesDueFilter(myEffectiveDue, dueFilter)) return false;
 
-      // ✅ User-only: "owned only"
       if (!isAdmin && userShowOwnedOnly) {
         const myId = userId || accessCodeId;
         if (!myId) return false;
         if (!isOwner(t, myId)) return false;
       }
 
-      const mine = myAssignmentForTask(t);
-      if (!mine) return false;
-
       return mine.status !== "complete";
     });
-  }, [tasks, userId, accessCodeId, expandedTaskId, dueFilter, categoryFilter, searchText, userShowOwnedOnly]);
-
+  }, [tasks, userId, accessCodeId, expandedTaskId, dueFilter, categoryFilter, searchText, userShowOwnedOnly, hasSearch]);
 
 
   const adminFilterOptions = useMemo(() => {
@@ -572,15 +560,18 @@ export default function TasksClient() {
   }, [users]);
 
   const closedTasks = useMemo(() => {
+    // ✅ When searching, do not show any closed tasks
+    if (hasSearch) return [];
+
     if (!userId && !accessCodeId) return [];
+
     return tasks.filter((t) => {
       const myId = userId || accessCodeId || null;
       const myEffectiveDue = effectiveDueForAssignee(t, myId);
 
+      if (categoryFilter !== "__all__" && t.category_id !== categoryFilter) return false;
       if (!isDueVisible(myEffectiveDue)) return false;
       if (!matchesDueFilter(myEffectiveDue, dueFilter)) return false;
-
-      if (!matchesSearch(t, searchText)) return false;
 
       if (!isAdmin && userShowOwnedOnly) {
         const myId = userId || accessCodeId;
@@ -590,9 +581,10 @@ export default function TasksClient() {
 
       const mine = myAssignmentForTask(t);
       if (!mine) return false;
+
       return mine.status === "complete";
     });
-  }, [tasks, userId, accessCodeId, dueFilter, categoryFilter, searchText, userShowOwnedOnly]);
+  }, [tasks, userId, accessCodeId, dueFilter, categoryFilter, searchText, userShowOwnedOnly, hasSearch]);
 
 
   const unassignedTasks = useMemo(() => {
@@ -600,50 +592,50 @@ export default function TasksClient() {
       .filter((t) => {
         if ((t.task_assignments ?? []).length !== 0) return false;
 
+        if (hasSearch) {
+          return matchesSearch(t, searchText);
+        }
+
         if (categoryFilter !== "__all__" && (t as any).category_id !== categoryFilter) return false;
-
         if (!matchesSearch(t, searchText)) return false;
-
-        // ✅ apply the same due filter rules as the user screen
         if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(t.due_at)) return false;
         if (!matchesDueFilter(t.due_at, dueFilter)) return false;
 
         return true;
       })
-
       .sort((a, b) => {
         const aa = a.created_at ? new Date(a.created_at).getTime() : 0;
         const bb = b.created_at ? new Date(b.created_at).getTime() : 0;
         return bb - aa;
       });
-  }, [tasks, dueFilter, categoryFilter, searchText]);
+  }, [tasks, dueFilter, categoryFilter, searchText, hasSearch]);
 
 
   const tasksByAssignee = useMemo(() => {
     const map = new Map<string, TaskRow[]>();
 
     for (const t of tasks) {
-      // ✅ apply the same due filter rules as the user screen
-      // We apply due/snooze per-user, so compute per uid below.
-      // (Don't filter here using t.due_at)
-
-      if (categoryFilter !== "__all__" && (t as any).category_id !== categoryFilter) continue;
-      if (!matchesSearch(t, searchText)) continue;
-
+      if (hasSearch) {
+        if (!matchesSearch(t, searchText)) continue;
+      } else {
+        if (categoryFilter !== "__all__" && (t as any).category_id !== categoryFilter) continue;
+        if (!matchesSearch(t, searchText)) continue;
+      }
 
       const assigneeIds = (t.task_assignments ?? []).map((a) => a.assignee_id);
       if (assigneeIds.length === 0) continue;
 
       for (const uid of assigneeIds) {
-        const eff = effectiveDueForAssignee(t, uid);
+        if (!hasSearch) {
+          const eff = effectiveDueForAssignee(t, uid);
 
-        if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(eff)) continue;
-        if (!matchesDueFilter(eff, dueFilter)) continue;
+          if (dueFilter !== "__all__" && dueFilter !== "not_due_yet" && !isDueVisible(eff)) continue;
+          if (!matchesDueFilter(eff, dueFilter)) continue;
+        }
 
         if (!map.has(uid)) map.set(uid, []);
         map.get(uid)!.push(t);
       }
-
     }
 
     for (const [k, arr] of map.entries()) {
@@ -656,7 +648,7 @@ export default function TasksClient() {
     }
 
     return map;
-  }, [tasks, dueFilter, categoryFilter, searchText]);
+  }, [tasks, dueFilter, categoryFilter, searchText, hasSearch]);
 
 
   async function loadSessionAndTasks() {
@@ -2256,7 +2248,7 @@ export default function TasksClient() {
                                   .filter((t) => !isAssignmentDone(t, uid))
                                   .map(renderTaskCard)}
 
-                                {showClosed &&
+                                {!hasSearch && showClosed &&
                                   userTasks
                                     .filter(onlyExpanded)
                                     .filter((t) => isAssignmentDone(t, uid))
